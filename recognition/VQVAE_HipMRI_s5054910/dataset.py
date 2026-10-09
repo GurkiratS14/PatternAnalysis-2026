@@ -13,8 +13,12 @@ Data audit findings this loader is built around (run on Rangpur, Oct 2026):
                        test 3 patients / 540 slices
       No patient appears in more than one split, so the provided split is
       already patient-level and is used unchanged.
-    * 12,600 slices are 256 x 128; 60 slices are 256 x 144.
-      -> the wider slices are centre-cropped to 256 x 128.
+    * On disk, 12,600 slices are 256 x 128 and 60 slices are 256 x 144.
+      -> the larger slices are centre-cropped to match the rest.
+    * The arrays are stored with the body's left-right axis first, so a raw
+      slice displays sideways.
+      -> each slice is transposed to 128 x 256 (height x width), the usual
+         axial view with the body wider than it is tall.
     * Raw intensities are unnormalised (e.g. 0 to 411 for one slice).
 
 Run this file directly for a quick check:
@@ -42,8 +46,8 @@ SPLIT_DIRS = {
     "test": "keras_slices_test",
 }
 
-# Every slice is brought to this (height, width).
-TARGET_SHAPE = (256, 128)
+# Every slice is brought to this (height, width), after transposing.
+TARGET_SHAPE = (128, 256)
 
 # Intensities above this quantile of a slice are clipped before scaling, so a
 # few very bright pixels do not squash the rest of the image towards black.
@@ -126,11 +130,14 @@ def normalise(image, clip_quantile=CLIP_QUANTILE):
 
 
 def load_slice(path):
-    """Load one Nifti slice as a float tensor of shape (1, 256, 128) in [0, 1]."""
-    data = nib.load(path).get_fdata(caching="unchanged", dtype=np.float32) # pyright: ignore[reportAttributeAccessIssue]
+    """Load one Nifti slice as a float tensor of shape (1, 128, 256) in [0, 1]."""
+    data = nib.load(path).get_fdata(caching="unchanged", dtype=np.float32)  # pyright: ignore[reportAttributeAccessIssue]
     if data.ndim == 3:
         # Some HipMRI files carry an extra singleton dimension.
         data = data[:, :, 0]
+    # Stored as (left-right, front-back); transpose so the body lies
+    # horizontally, as in a standard axial view.
+    data = data.T
     image = torch.from_numpy(np.ascontiguousarray(data))
     image = centre_crop(image)
     image = normalise(image)
@@ -140,7 +147,7 @@ def load_slice(path):
 class HipMRISlices(Dataset):
     """HipMRI 2D prostate MRI slices for one split.
 
-    Each item is a float tensor of shape (1, 256, 128) with values in [0, 1].
+    Each item is a float tensor of shape (1, 128, 256) with values in [0, 1].
     There are no labels because the task is unconditional image generation.
 
     Args:
@@ -232,7 +239,7 @@ def main():
 
     if args.grid:
         from torchvision.utils import save_image
-        save_image(batch[:32], args.grid, nrow=8)
+        save_image(batch[:32], args.grid, nrow=4)
         print("Saved sample grid to", args.grid)
 
 
