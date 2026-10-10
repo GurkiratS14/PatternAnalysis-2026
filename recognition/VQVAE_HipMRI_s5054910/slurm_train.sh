@@ -10,7 +10,6 @@
 # Submit from the project folder, passing train.py arguments after the script:
 #   sbatch slurm_train.sh --model dcgan --epochs 100
 
-source $HOME/miniconda3/bin/activate
-conda activate torch
+source $HOME/miniconda3/bin/activate torch
 
 python3 train.py "$@"
