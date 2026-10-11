@@ -1,15 +1,17 @@
+cat > slurm_train.sh <<'EOF'
 #!/bin/bash
 #SBATCH --account=comp3710
-#SBATCH --job-name=hipmri-predict
+#SBATCH --job-name=hipmri-train
 #SBATCH --partition=comp3710
 #SBATCH --gres=gpu:1
-#SBATCH --time=00:30:00
-#SBATCH --output=predict_%j.out
-#SBATCH --error=predict_%j.err
+#SBATCH --time=02:00:00
+#SBATCH --output=train_%j.out
+#SBATCH --error=train_%j.err
 
-# Submit from the project folder, passing predict.py arguments after the script:
-#   sbatch slurm_predict.sh --model dcgan
+# Submit from the project folder, passing train.py arguments after the script:
+#   sbatch slurm_train.sh --model dcgan --epochs 100
 
 source $HOME/miniconda3/bin/activate torch
 
-python3 predict.py "$@"
+python3 train.py "$@"
+EOF
