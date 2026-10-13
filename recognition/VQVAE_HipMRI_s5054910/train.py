@@ -1,13 +1,15 @@
 """
 train.py - Training script for HipMRI image generation models.
 
-Currently trains the DCGAN baseline. Saves sample grids, loss curves and
-model weights to --out-dir, which should sit outside the repository.
+Trains the DCGAN baseline or the WGAN-GP. Saves sample grids, training
+curves and model weights to --out-dir, which should sit outside the
+repository.
 
 Usage:
     python3 train.py --model dcgan --epochs 100
+    python3 train.py --model wgan_gp --epochs 300
 Quick check on a few slices:
-    python3 train.py --model dcgan --epochs 1 --max-slices 64 --batch-size 16
+    python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
 """
 
 import argparse
@@ -23,7 +25,24 @@ from torch import nn
 from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, get_dataloaders
-from modules import LATENT_DIM, Discriminator, Generator, count_parameters
+from modules import LATENT_DIM, Critic, Discriminator, Generator, count_parameters
+
+DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4}
+
+DCGAN_PANELS = [
+    {"title": "Training loss", "ylabel": "BCE loss",
+     "series": [("d_loss", "Discriminator"), ("g_loss", "Generator")]},
+    {"title": "Discriminator's belief that an image is real",
+     "ylabel": "Mean probability", "ylim": (0, 1), "hline": 0.5,
+     "series": [("d_real", "D(x): real images"), ("d_fake", "D(G(z)): fake images")]},
+]
+
+WGAN_PANELS = [
+    {"title": "Training loss", "ylabel": "Loss",
+     "series": [("critic_loss", "Critic"), ("g_loss", "Generator")]},
+    {"title": "Estimated Wasserstein distance", "ylabel": "Mean real score - mean fake score",
+     "series": [("wasserstein", "Critic estimate")]},
+]
 
 
 def to_tanh_range(images):
@@ -36,47 +55,62 @@ def to_unit_range(images):
     return (images + 1.0) / 2.0
 
 
-def save_history(history, out_dir):
-    """Write per-epoch training statistics to a CSV file and a PNG figure."""
+def make_train_loader(args):
+    """Training DataLoader, after the patient leakage check in get_dataloaders."""
+    train_loader, _, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
+                                         max_slices=args.max_slices)
+    if len(train_loader) == 0:
+        raise ValueError("No full batch available: lower --batch-size.")
+    return train_loader
+
+
+def save_history(history, out_dir, panels):
+    """Write per-epoch statistics to a CSV file and plot them, one panel per group."""
     with open(os.path.join(out_dir, "history.csv"), "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
         writer.writeheader()
         writer.writerows(history)
 
     epochs = [row["epoch"] for row in history]
-    blue, orange = "#2a78d6", "#eb6834"
-    fig, (ax_loss, ax_prob) = plt.subplots(1, 2, figsize=(11, 4))
-
-    ax_loss.plot(epochs, [row["d_loss"] for row in history], color=blue,
-                 linewidth=2, label="Discriminator")
-    ax_loss.plot(epochs, [row["g_loss"] for row in history], color=orange,
-                 linewidth=2, linestyle="--", label="Generator")
-    ax_loss.set(title="Training loss", xlabel="Epoch", ylabel="BCE loss")
-
-    ax_prob.plot(epochs, [row["d_real"] for row in history], color=blue,
-                 linewidth=2, label="D(x): real images")
-    ax_prob.plot(epochs, [row["d_fake"] for row in history], color=orange,
-                 linewidth=2, linestyle="--", label="D(G(z)): fake images")
-    ax_prob.axhline(0.5, color="gray", linewidth=1, linestyle=":")
-    ax_prob.set(title="Discriminator's belief that an image is real",
-                xlabel="Epoch", ylabel="Mean probability", ylim=(0, 1))
-
-    for ax in (ax_loss, ax_prob):
+    colours, styles = ["#2a78d6", "#eb6834"], ["-", "--"]
+    fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 4), squeeze=False)
+    for ax, panel in zip(axes[0], panels):
+        for i, (key, label) in enumerate(panel["series"]):
+            ax.plot(epochs, [row[key] for row in history], color=colours[i],
+                    linestyle=styles[i], linewidth=2, label=label)
+        if "hline" in panel:
+            ax.axhline(panel["hline"], color="gray", linewidth=1, linestyle=":")
+        if "ylim" in panel:
+            ax.set_ylim(*panel["ylim"])
+        ax.set(title=panel["title"], xlabel="Epoch", ylabel=panel["ylabel"])
         ax.grid(alpha=0.3)
-        ax.legend(frameon=False)
+        if len(panel["series"]) > 1:
+            ax.legend(frameon=False)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "training_curves.png"), dpi=150)
     plt.close(fig)
 
 
+def save_progress(generator, fixed_noise, epoch, out_dir, checkpoint):
+    """Save a sample grid from the fixed noise, and the model weights."""
+    generator.eval()
+    with torch.no_grad():
+        samples = to_unit_range(generator(fixed_noise))
+    generator.train()
+    save_image(samples, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"), nrow=4)
+    name = os.path.basename(out_dir)
+    torch.save(checkpoint, os.path.join(out_dir, f"{name}.pt"))
+
+
+def print_epoch(epoch, total, row, seconds):
+    """One line per epoch with every logged statistic."""
+    stats = "  ".join(f"{key} {value:.3f}" for key, value in row.items() if key != "epoch")
+    print(f"Epoch {epoch:3d}/{total}  {stats}  {seconds:.0f}s", flush=True)
+
+
 def train_dcgan(args, device, out_dir):
     """Train the DCGAN baseline with the standard alternating GAN updates."""
-    train_loader, _, _ = get_dataloaders(args.root, args.batch_size,
-                                         num_workers=0,
-                                         max_slices=args.max_slices)
-    if len(train_loader) == 0:
-        raise ValueError("No full batch available: lower --batch-size.")
-
+    train_loader = make_train_loader(args)
     generator = Generator(args.latent_dim).to(device)
     discriminator = Discriminator().to(device)
     print(f"Generator parameters: {count_parameters(generator):,}")
@@ -89,8 +123,6 @@ def train_dcgan(args, device, out_dir):
     # The same noise every time, so sample grids show progress across epochs.
     fixed_noise = torch.randn(16, args.latent_dim, device=device)
     history = []
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats()
 
     for epoch in range(1, args.epochs + 1):
         generator.train()
@@ -129,53 +161,129 @@ def train_dcgan(args, device, out_dir):
         row: dict[str, float] = {"epoch": epoch}
         row.update({key: value / len(train_loader) for key, value in totals.items()})
         history.append(row)
-        print(f"Epoch {epoch:3d}/{args.epochs}  "
-              f"D loss {row['d_loss']:.3f}  G loss {row['g_loss']:.3f}  "
-              f"D(x) {row['d_real']:.2f}  D(G(z)) {row['d_fake']:.2f}  "
-              f"{time.time() - start:.0f}s", flush=True)
+        print_epoch(epoch, args.epochs, row, time.time() - start)
 
         if epoch % args.sample_every == 0 or epoch == args.epochs:
-            generator.eval()
-            with torch.no_grad():
-                samples = to_unit_range(generator(fixed_noise))
-            save_image(samples, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"),
-                       nrow=4)
-            torch.save({"generator": generator.state_dict(),
-                        "discriminator": discriminator.state_dict(),
-                        "epoch": epoch,
-                        "latent_dim": args.latent_dim},
-                       os.path.join(out_dir, "dcgan.pt"))
-            save_history(history, out_dir)
+            save_progress(generator, fixed_noise, epoch, out_dir,
+                          {"generator": generator.state_dict(),
+                           "discriminator": discriminator.state_dict(),
+                           "epoch": epoch, "latent_dim": args.latent_dim})
+            save_history(history, out_dir, DCGAN_PANELS)
 
-    if device.type == "cuda":
-        print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
-    print("Outputs saved to", out_dir)
+
+def gradient_penalty(critic, real, fake):
+    """Mean of (||grad critic(x_hat)|| - 1)^2 at random points between real and fake."""
+    eps = torch.rand(real.size(0), 1, 1, 1, device=real.device)
+    mixed = (eps * real + (1 - eps) * fake).requires_grad_(True)
+    grads, = torch.autograd.grad(critic(mixed).sum(), mixed, create_graph=True)
+    return ((grads.flatten(1).norm(2, dim=1) - 1) ** 2).mean()
+
+
+def train_wgan_gp(args, device, out_dir):
+    """Train the WGAN-GP: n_critic critic steps for every generator step."""
+    train_loader = make_train_loader(args)
+    generator = Generator(args.latent_dim).to(device)
+    critic = Critic().to(device)
+    print(f"Generator parameters: {count_parameters(generator):,}")
+    print(f"Critic parameters: {count_parameters(critic):,}")
+
+    opt_g = torch.optim.Adam(generator.parameters(), lr=args.lr, betas=(0.0, 0.9))
+    opt_c = torch.optim.Adam(critic.parameters(), lr=args.lr, betas=(0.0, 0.9))
+
+    fixed_noise = torch.randn(16, args.latent_dim, device=device)
+    history = []
+    critic_steps = 0  # counted across epochs, so the n_critic rhythm never resets
+
+    for epoch in range(1, args.epochs + 1):
+        generator.train()
+        start = time.time()
+        totals = {"critic_loss": 0.0, "wasserstein": 0.0, "gp": 0.0, "g_loss": 0.0}
+        generator_steps = 0
+
+        for real in train_loader:
+            real = to_tanh_range(real.to(device))
+            batch = real.size(0)
+
+            # Critic step: score real high and fake low, with gradients kept near 1.
+            with torch.no_grad():
+                fake = generator(torch.randn(batch, args.latent_dim, device=device))
+            real_score = critic(real).mean()
+            fake_score = critic(fake).mean()
+            penalty = gradient_penalty(critic, real, fake)
+            critic_loss = fake_score - real_score + args.gp_weight * penalty
+            opt_c.zero_grad(set_to_none=True)
+            critic_loss.backward()
+            opt_c.step()
+            critic_steps += 1
+
+            totals["critic_loss"] += critic_loss.item()
+            totals["wasserstein"] += (real_score - fake_score).item()
+            totals["gp"] += penalty.item()
+
+            # Generator step every n_critic critic steps: raise the critic's score of fakes.
+            if critic_steps % args.n_critic == 0:
+                fake = generator(torch.randn(batch, args.latent_dim, device=device))
+                g_loss = -critic(fake).mean()
+                opt_g.zero_grad(set_to_none=True)
+                g_loss.backward()
+                opt_g.step()
+                totals["g_loss"] += g_loss.item()
+                generator_steps += 1
+
+        row: dict[str, float] = {"epoch": epoch}
+        for key in ("critic_loss", "wasserstein", "gp"):
+            row[key] = totals[key] / len(train_loader)
+        row["g_loss"] = totals["g_loss"] / generator_steps if generator_steps else float("nan")
+        history.append(row)
+        print_epoch(epoch, args.epochs, row, time.time() - start)
+
+        if epoch % args.sample_every == 0 or epoch == args.epochs:
+            save_progress(generator, fixed_noise, epoch, out_dir,
+                          {"generator": generator.state_dict(),
+                           "critic": critic.state_dict(),
+                           "epoch": epoch, "latent_dim": args.latent_dim})
+            save_history(history, out_dir, WGAN_PANELS)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
-    parser.add_argument("--model", choices=["dcgan"], default="dcgan")
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp"], default="dcgan")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default=os.path.expanduser("~/hipmri_runs"))
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Defaults to 2e-4 for dcgan and 1e-4 for wgan_gp.")
     parser.add_argument("--latent-dim", type=int, default=LATENT_DIM)
+    parser.add_argument("--n-critic", type=int, default=5,
+                        help="WGAN-GP: critic steps per generator step.")
+    parser.add_argument("--gp-weight", type=float, default=10.0,
+                        help="WGAN-GP: weight of the gradient penalty.")
     parser.add_argument("--sample-every", type=int, default=5,
                         help="Save samples, weights and curves every N epochs.")
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N slices per split (quick checks).")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if args.lr is None:
+        args.lr = DEFAULT_LR[args.model]
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = os.path.join(args.out_dir, args.model)
     os.makedirs(out_dir, exist_ok=True)
     print("Device:", device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     if args.model == "dcgan":
         train_dcgan(args, device, out_dir)
+    else:
+        train_wgan_gp(args, device, out_dir)
+
+    if device.type == "cuda":
+        print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+    print("Outputs saved to", out_dir)
 
 
 if __name__ == "__main__":
