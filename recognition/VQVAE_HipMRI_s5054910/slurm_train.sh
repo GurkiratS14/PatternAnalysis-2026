@@ -1,4 +1,3 @@
-cat > slurm_train.sh <<'EOF'
 #!/bin/bash
 #SBATCH --account=comp3710
 #SBATCH --job-name=hipmri-train
@@ -14,4 +13,3 @@ cat > slurm_train.sh <<'EOF'
 source $HOME/miniconda3/bin/activate torch
 
 python3 train.py "$@"
-EOF
