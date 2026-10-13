@@ -28,7 +28,7 @@ SSIM_TARGET = 0.6
 
 
 def load_generator(weights_path, device):
-    """Rebuild the DCGAN generator and load its trained weights."""
+    """Rebuild the GAN generator (shared by DCGAN and WGAN-GP) and load its weights."""
     checkpoint = torch.load(weights_path, map_location=device)
     generator = Generator(checkpoint["latent_dim"]).to(device)
     generator.load_state_dict(checkpoint["generator"])
@@ -106,7 +106,7 @@ def plot_ssim_histogram(generated_scores, real_scores, path):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
-    parser.add_argument("--model", choices=["dcgan"], default="dcgan")
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp"], default="dcgan")
     parser.add_argument("--weights", default=None,
                         help="Defaults to ~/hipmri_runs/<model>/<model>.pt")
     parser.add_argument("--root", default=DEFAULT_ROOT)
