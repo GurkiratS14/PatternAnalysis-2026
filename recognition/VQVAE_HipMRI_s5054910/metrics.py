@@ -70,6 +70,22 @@ def ssim_pairs(first, second, kernel=None):
 
 
 @torch.no_grad()
+def mean_pairwise_ssim(images, device, query_batch=16):
+    """Mean SSIM over all pairs of different images in a set (a diversity measure).
+
+    Lower means a more varied set; a model suffering mode collapse scores high.
+    """
+    kernel = gaussian_kernel()
+    images = images.to(device)
+    count = images.size(0)
+    total = 0.0
+    for start in range(0, count, query_batch):
+        total += ssim_matrix(images[start:start + query_batch], images, kernel).sum().item()
+    total -= count  # remove each image compared with itself (SSIM 1)
+    return total / (count * (count - 1))
+
+
+@torch.no_grad()
 def best_match_ssim(queries, references, device, query_batch=16,
                     reference_batch=256, description="SSIM"):
     """For each query, find the most similar reference image.
