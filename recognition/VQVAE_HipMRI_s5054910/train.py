@@ -1,13 +1,14 @@
 """
 train.py - Training script for HipMRI image generation models.
 
-Trains the DCGAN baseline or the WGAN-GP. Saves sample grids, training
-curves and model weights to --out-dir, which should sit outside the
-repository.
+Trains the DCGAN baseline, the WGAN-GP or the VQ-VAE. Saves sample or
+reconstruction grids, training curves and model weights to --out-dir, which
+should sit outside the repository.
 
 Usage:
     python3 train.py --model dcgan --epochs 100
-    python3 train.py --model wgan_gp --epochs 300
+    python3 train.py --model wgan_gp --epochs 500
+    python3 train.py --model vqvae --epochs 100
 Quick check on a few slices:
     python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
 """
@@ -21,13 +22,24 @@ import matplotlib
 matplotlib.use("Agg")  # no display on the cluster
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision.utils import save_image
 
-from dataset import DEFAULT_ROOT, get_dataloaders
-from modules import LATENT_DIM, Critic, Discriminator, Generator, count_parameters
+from dataset import DEFAULT_ROOT, HipMRISlices, get_dataloaders
+from metrics import ssim_pairs
+from modules import LATENT_DIM, VQVAE, Critic, Discriminator, Generator, count_parameters
 
-DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4}
+DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4}
+
+VQVAE_PANELS = [
+    {"title": "Reconstruction error", "ylabel": "MSE",
+     "series": [("recon_loss", "Training"), ("val_mse", "Validation")]},
+    {"title": "Validation reconstruction SSIM", "ylabel": "Mean SSIM",
+     "ylim": (0, 1), "hline": 0.6, "series": [("val_ssim", "Validation")]},
+    {"title": "Codebook usage", "ylabel": "Codes used per epoch",
+     "series": [("codes_used", "Codes used")]},
+]
 
 DCGAN_PANELS = [
     {"title": "Training loss", "ylabel": "BCE loss",
@@ -245,9 +257,91 @@ def train_wgan_gp(args, device, out_dir):
             save_history(history, out_dir, WGAN_PANELS)
 
 
+@torch.no_grad()
+def evaluate_reconstruction(model, loader, device):
+    """Mean MSE and mean paired SSIM of reconstructions over a DataLoader."""
+    model.eval()
+    total_mse, total_ssim, count = 0.0, 0.0, 0
+    for real in loader:
+        real = real.to(device)
+        recon = model(real)[0].clamp(0, 1)
+        total_mse += F.mse_loss(recon, real, reduction="sum").item() / real[0].numel()
+        total_ssim += ssim_pairs(recon, real).sum().item()
+        count += real.size(0)
+    model.train()
+    return total_mse / count, total_ssim / count
+
+
+def train_vqvae(args, device, out_dir):
+    """Train the VQ-VAE on reconstruction, keeping the checkpoint with the best validation SSIM."""
+    train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
+                                                  max_slices=args.max_slices)
+    if len(train_loader) == 0:
+        raise ValueError("No full batch available: lower --batch-size.")
+
+    model = VQVAE(args.codebook_size, args.embedding_dim, args.beta).to(device)
+    print(f"VQ-VAE parameters: {count_parameters(model):,}")
+    optimiser = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    val_set = val_loader.dataset
+    assert isinstance(val_set, HipMRISlices)
+    picks = torch.linspace(0, len(val_set) - 1, 8).long().tolist()
+    fixed = torch.stack([val_set[i] for i in picks]).to(device)
+    history, best_ssim = [], -1.0
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        start = time.time()
+        totals = {"recon_loss": 0.0, "vq_loss": 0.0}
+        last_batch = torch.empty(0)
+
+        for real in train_loader:
+            real = real.to(device)
+            last_batch = real
+            recon, vq_loss, _ = model(real)
+            recon_loss = F.mse_loss(recon, real)
+            loss = recon_loss + vq_loss
+            optimiser.zero_grad(set_to_none=True)
+            loss.backward()
+            optimiser.step()
+            totals["recon_loss"] += recon_loss.item()
+            totals["vq_loss"] += vq_loss.item()
+
+        codes_used, perplexity = model.quantizer.usage_stats()
+        with torch.no_grad():
+            latents = model.encoder(last_batch)
+            latents = latents.permute(0, 2, 3, 1).reshape(-1, latents.size(1))
+        restarted = model.quantizer.reset_dead_codes(latents)
+        val_mse, val_ssim = evaluate_reconstruction(model, val_loader, device)
+
+        row: dict[str, float] = {"epoch": epoch}
+        row.update({key: value / len(train_loader) for key, value in totals.items()})
+        row.update({"val_mse": val_mse, "val_ssim": val_ssim, "codes_used": codes_used,
+                    "perplexity": perplexity, "restarted": restarted})
+        history.append(row)
+        print_epoch(epoch, args.epochs, row, time.time() - start)
+
+        if val_ssim > best_ssim:
+            best_ssim = val_ssim
+            torch.save({"model": model.state_dict(), "config": model.config,
+                        "epoch": epoch, "val_ssim": val_ssim},
+                       os.path.join(out_dir, "vqvae.pt"))
+
+        if epoch % args.sample_every == 0 or epoch == args.epochs:
+            model.eval()
+            with torch.no_grad():
+                recon = model(fixed)[0].clamp(0, 1)
+            model.train()
+            save_image(torch.cat([fixed, recon]),
+                       os.path.join(out_dir, f"recon_epoch_{epoch:03d}.png"), nrow=8)
+            save_history(history, out_dir, VQVAE_PANELS)
+
+    print(f"Best validation SSIM: {best_ssim:.3f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
-    parser.add_argument("--model", choices=["dcgan", "wgan_gp"], default="dcgan")
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae"], default="dcgan")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default=os.path.expanduser("~/hipmri_runs"))
     parser.add_argument("--epochs", type=int, default=100)
@@ -259,6 +353,12 @@ def main():
                         help="WGAN-GP: critic steps per generator step.")
     parser.add_argument("--gp-weight", type=float, default=10.0,
                         help="WGAN-GP: weight of the gradient penalty.")
+    parser.add_argument("--codebook-size", type=int, default=512,
+                        help="VQ-VAE: number of codebook vectors.")
+    parser.add_argument("--embedding-dim", type=int, default=64,
+                        help="VQ-VAE: length of each codebook vector.")
+    parser.add_argument("--beta", type=float, default=0.25,
+                        help="VQ-VAE: weight of the commitment loss.")
     parser.add_argument("--sample-every", type=int, default=5,
                         help="Save samples, weights and curves every N epochs.")
     parser.add_argument("--max-slices", type=int, default=None,
@@ -278,8 +378,10 @@ def main():
 
     if args.model == "dcgan":
         train_dcgan(args, device, out_dir)
-    else:
+    elif args.model == "wgan_gp":
         train_wgan_gp(args, device, out_dir)
+    else:
+        train_vqvae(args, device, out_dir)
 
     if device.type == "cuda":
         print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
