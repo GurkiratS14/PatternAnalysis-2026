@@ -57,6 +57,18 @@ def ssim_matrix(queries, references, kernel=None):
     return ssim_map.mean(dim=(-2, -1))
 
 
+def ssim_pairs(first, second, kernel=None):
+    """SSIM between first[i] and second[i] for each i: (N, 1, H, W) -> (N,)."""
+    kernel = gaussian_kernel() if kernel is None else kernel
+    mu_a, mu_b = blur(first, kernel), blur(second, kernel)
+    var_a = blur(first * first, kernel) - mu_a ** 2
+    var_b = blur(second * second, kernel) - mu_b ** 2
+    covariance = blur(first * second, kernel) - mu_a * mu_b
+    ssim_map = (((2 * mu_a * mu_b + C1) * (2 * covariance + C2))
+                / ((mu_a ** 2 + mu_b ** 2 + C1) * (var_a + var_b + C2)))
+    return ssim_map.mean(dim=(-3, -2, -1))
+
+
 @torch.no_grad()
 def best_match_ssim(queries, references, device, query_batch=16,
                     reference_batch=256, description="SSIM"):
