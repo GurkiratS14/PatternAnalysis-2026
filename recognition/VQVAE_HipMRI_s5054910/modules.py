@@ -2,8 +2,9 @@
 modules.py - Model components for HipMRI image generation.
 
 Holds the DCGAN baseline (Radford et al., 2015), the WGAN-GP critic
-(Gulrajani et al., 2017) and the VQ-VAE (van den Oord et al., 2017), sized
-for 1 x 128 x 256 slices. Both GANs share the same generator.
+(Gulrajani et al., 2017), the VQ-VAE (van den Oord et al., 2017) and the
+gated PixelCNN prior over its codes (van den Oord et al., 2016), sized for
+1 x 128 x 256 slices. Both GANs share the same generator.
 
 Run this file directly to check output shapes and parameter counts:
     python3 modules.py
@@ -258,7 +259,99 @@ class VQVAE(nn.Module):
         return self.decoder(self.quantizer.lookup(indices))
 
 
+def gate(x):
+    """Gated activation: tanh(first half) * sigmoid(second half) along channels."""
+    a, b = x.chunk(2, dim=1)
+    return torch.tanh(a) * torch.sigmoid(b)
+
+
+class GatedLayer(nn.Module):
+    """One gated PixelCNN layer with vertical and horizontal stacks (van den Oord et al., 2016).
+
+    The vertical stack sees rows above the current position and the
+    horizontal stack sees positions to its left in the same row. In the
+    first layer the current position itself is also hidden, so no output
+    ever depends on the code it is predicting.
+    """
+
+    v_mask: torch.Tensor
+    h_mask: torch.Tensor
+
+    def __init__(self, dim, kernel=7, first=False):
+        super().__init__()
+        half = kernel // 2
+        self.first = first
+        self.vertical = nn.Conv2d(dim, 2 * dim, (half + 1, kernel), padding=(half, half))
+        self.horizontal = nn.Conv2d(dim, 2 * dim, (1, half + 1), padding=(0, half))
+        self.vert_to_horiz = nn.Conv2d(2 * dim, 2 * dim, 1)
+        self.horiz_out = nn.Conv2d(dim, dim, 1)
+        v_mask = torch.ones(1, 1, half + 1, kernel)
+        h_mask = torch.ones(1, 1, 1, half + 1)
+        if first:
+            v_mask[:, :, -1] = 0     # hide the current row
+            h_mask[:, :, :, -1] = 0  # hide the current position
+        self.register_buffer("v_mask", v_mask)
+        self.register_buffer("h_mask", h_mask)
+
+    def forward(self, v, h):
+        height, width = v.shape[-2:]
+        # Pad then crop, so each output only sees rows above / columns to the left.
+        v_pre = F.conv2d(v, self.vertical.weight * self.v_mask, self.vertical.bias,
+                         padding=self.vertical.padding)[:, :, :height]
+        h_pre = F.conv2d(h, self.horizontal.weight * self.h_mask, self.horizontal.bias,
+                         padding=self.horizontal.padding)[:, :, :, :width]
+        v_out = gate(v_pre)
+        h_out = self.horiz_out(gate(h_pre + self.vert_to_horiz(v_pre)))
+        if not self.first:
+            h_out = h_out + h
+        return v_out, h_out
+
+
+class PixelCNN(nn.Module):
+    """Gated PixelCNN prior over VQ-VAE code grids.
+
+    Maps a (B, H, W) grid of code indices to (B, num_embeddings, H, W)
+    logits, where the logits at each position depend only on the codes
+    before it in raster order (left to right, top to bottom).
+    """
+
+    def __init__(self, num_embeddings=512, dim=128, num_layers=12, kernel=7):
+        super().__init__()
+        self.config = {"num_embeddings": num_embeddings, "dim": dim,
+                       "num_layers": num_layers, "kernel": kernel}
+        self.embedding = nn.Embedding(num_embeddings, dim)
+        self.layers = nn.ModuleList([GatedLayer(dim, kernel, first=(i == 0))
+                                     for i in range(num_layers)])
+        self.output = nn.Sequential(
+            nn.Conv2d(dim, dim, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(dim, num_embeddings, 1),
+        )
+
+    def forward(self, codes):
+        x = self.embedding(codes).permute(0, 3, 1, 2)
+        v, h = x, x
+        for layer in self.layers:
+            v, h = layer(v, h)
+        return self.output(h)
+
+    @torch.no_grad()
+    def sample(self, count, height, width, device, temperature=1.0):
+        """Sample code grids one position at a time in raster order."""
+        codes = torch.zeros(count, height, width, dtype=torch.long, device=device)
+        for row in range(height):
+            for col in range(width):
+                # Rows below the current one cannot affect it, so they are skipped.
+                logits = self(codes[:, :row + 1])[:, :, row, col]
+                probs = F.softmax(logits / temperature, dim=1)
+                codes[:, row, col] = torch.multinomial(probs, 1).squeeze(1)
+        return codes
+
+
 if __name__ == "__main__":
+    prior = PixelCNN()
+    print("PixelCNN logits:", tuple(prior(torch.zeros(2, 32, 64, dtype=torch.long)).shape))
+    print(f"PixelCNN parameters: {count_parameters(prior):,}")
+
     vqvae = VQVAE()
     images = torch.rand(2, 1, 128, 256)
     recon, vq_loss, codes = vqvae(images)
