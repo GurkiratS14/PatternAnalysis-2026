@@ -1,12 +1,16 @@
 """
 predict.py - Generate slices from a trained model and evaluate them.
 
-Loads saved weights, generates an uncurated set of samples, times the
-generation, and scores the samples with best-match SSIM against real slices.
-Also saves the figures used for the memorisation audit.
+For the GANs: generates an uncurated set of samples, times the generation,
+scores them with best-match SSIM against real slices, and saves the
+memorisation-audit figures.
+
+For the VQ-VAE: reconstructs every test slice, scores each against its own
+original with paired SSIM, and saves the best and worst reconstructions.
 
 Usage:
-    python3 predict.py --model dcgan --weights ~/hipmri_runs/dcgan/dcgan.pt
+    python3 predict.py --model dcgan
+    python3 predict.py --model vqvae
 """
 
 import argparse
@@ -21,8 +25,8 @@ import torch
 from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, HipMRISlices, check_no_patient_leakage
-from metrics import best_match_ssim
-from modules import Generator
+from metrics import best_match_ssim, ssim_pairs
+from modules import VQVAE, Generator
 
 SSIM_TARGET = 0.6
 
@@ -104,9 +108,86 @@ def plot_ssim_histogram(generated_scores, real_scores, path):
     plt.close(fig)
 
 
+def plot_reconstructions(originals, recons, scores, test_set, path, count=3):
+    """Original, reconstruction and absolute error for the best and worst slices."""
+    order = scores.argsort()
+    chosen = torch.cat([order[-count:].flip(0), order[:count]])
+    fig, axes = plt.subplots(3, len(chosen), figsize=(3 * len(chosen), 5.4), squeeze=False)
+    for column, index in enumerate(chosen.tolist()):
+        label = "Best" if column < count else "Worst"
+        error = (originals[index, 0] - recons[index, 0]).abs()
+        axes[0, column].imshow(originals[index, 0], cmap="gray", vmin=0, vmax=1)
+        axes[0, column].set_title(f"{label}: {test_set.patient_of(index)}\nSSIM {scores[index]:.2f}",
+                                  fontsize=10)
+        axes[1, column].imshow(recons[index, 0], cmap="gray", vmin=0, vmax=1)
+        axes[2, column].imshow(error, cmap="magma", vmin=0, vmax=0.5)
+    for ax in axes.flat:
+        ax.axis("off")
+    for row, name in enumerate(["Original", "Reconstruction", "Absolute error"]):
+        axes[row, 0].text(-0.08, 0.5, name, transform=axes[row, 0].transAxes,
+                          rotation=90, ha="right", va="center", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+@torch.no_grad()
+def evaluate_vqvae(args, device, weights, out_dir):
+    """Reconstruct every test slice and score it against its own original."""
+    checkpoint = torch.load(weights, map_location=device)
+    model = VQVAE(**checkpoint["config"]).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    print(f"Loaded epoch {checkpoint['epoch']} (validation SSIM {checkpoint['val_ssim']:.3f})")
+
+    check_no_patient_leakage(args.root)
+    test_set = HipMRISlices(args.root, "test", max_slices=args.max_slices)
+    originals = torch.stack([test_set[i] for i in range(len(test_set))])
+
+    model(originals[:8].to(device))  # warm-up
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    batches, codes = [], []
+    start = time.time()
+    for first in range(0, len(originals), 64):
+        batch = originals[first:first + 64].to(device)
+        recon, _, indices = model(batch)
+        batches.append(recon.clamp(0, 1).cpu())
+        codes.append(indices.cpu())
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    ms_per_image = (time.time() - start) / len(originals) * 1000
+
+    recons = torch.cat(batches)
+    scores = ssim_pairs(recons, originals)
+    used = torch.cat(codes).unique().numel()
+    results = {
+        "model": "vqvae",
+        "checkpoint_epoch": checkpoint["epoch"],
+        "num_test_slices": len(originals),
+        "ms_per_image": ms_per_image,
+        "reconstruction_ssim": summarise(scores),
+        "reconstruction_mse": torch.mean((recons - originals) ** 2).item(),
+        "codes_used_on_test": used,
+        "codebook_size": checkpoint["config"]["num_embeddings"],
+    }
+    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
+        json.dump(results, f, indent=2)
+
+    s = results["reconstruction_ssim"]
+    print(f"\nReconstruction SSIM on {len(originals)} test slices: mean {s['mean']:.3f}, "
+          f"std {s['std']:.3f}, min {s['min']:.3f}, max {s['max']:.3f}, "
+          f"{s['fraction_above_target']:.0%} above {SSIM_TARGET}")
+    print(f"Reconstruction MSE {results['reconstruction_mse']:.5f}, "
+          f"{ms_per_image:.2f} ms per image, {used}/{results['codebook_size']} codes used")
+    plot_reconstructions(originals, recons, scores, test_set,
+                         os.path.join(out_dir, "reconstructions.png"))
+    print("Outputs saved to", out_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
-    parser.add_argument("--model", choices=["dcgan", "wgan_gp"], default="dcgan")
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae"], default="dcgan")
     parser.add_argument("--weights", default=None,
                         help="Defaults to ~/hipmri_runs/<model>/<model>.pt")
     parser.add_argument("--root", default=DEFAULT_ROOT)
@@ -126,6 +207,10 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
+
+    if args.model == "vqvae":
+        evaluate_vqvae(args, device, weights, out_dir)
+        return
 
     generator = load_generator(weights, device)
     samples, seconds_per_image = generate_samples(generator, args.num_samples, device)
