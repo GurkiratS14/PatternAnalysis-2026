@@ -2,15 +2,19 @@
 predict.py - Generate slices from a trained model and evaluate them.
 
 For the GANs: generates an uncurated set of samples, times the generation,
-scores them with best-match SSIM against real slices, and saves the
-memorisation-audit figures.
+scores them with best-match SSIM against real slices, counts near-copies,
+measures diversity, and saves the memorisation-audit figures.
 
 For the VQ-VAE: reconstructs every test slice, scores each against its own
 original with paired SSIM, and saves the best and worst reconstructions.
 
+For the PixelCNN prior: samples new code grids, decodes them with the VQ-VAE,
+and runs the same sample audit as the GANs.
+
 Usage:
     python3 predict.py --model dcgan
     python3 predict.py --model vqvae
+    python3 predict.py --model pixelcnn
 """
 
 import argparse
@@ -25,10 +29,11 @@ import torch
 from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, HipMRISlices, check_no_patient_leakage
-from metrics import best_match_ssim, ssim_pairs
-from modules import VQVAE, Generator
+from metrics import best_match_ssim, mean_pairwise_ssim, ssim_pairs
+from modules import VQVAE, Generator, PixelCNN
 
 SSIM_TARGET = 0.6
+SAMPLE_MODELS = ("dcgan", "wgan_gp", "pixelcnn")
 
 
 def load_generator(weights_path, device):
@@ -57,6 +62,33 @@ def generate_samples(generator, num_samples, device, batch_size=64):
         torch.cuda.synchronize()
     seconds_per_image = (time.time() - start) / num_samples
     return torch.cat(batches).cpu(), seconds_per_image
+
+
+@torch.no_grad()
+def generate_from_prior(weights_path, num_samples, device, temperature=1.0, batch_size=64):
+    """Sample code grids from the PixelCNN prior and decode them with the VQ-VAE."""
+    checkpoint = torch.load(weights_path, map_location=device)
+    prior = PixelCNN(**checkpoint["config"]).to(device)
+    prior.load_state_dict(checkpoint["model"])
+    prior.eval()
+    vq_checkpoint = torch.load(checkpoint["vqvae_weights"], map_location=device)
+    vqvae = VQVAE(**vq_checkpoint["config"]).to(device)
+    vqvae.load_state_dict(vq_checkpoint["model"])
+    vqvae.eval()
+    print(f"Loaded prior from epoch {checkpoint['epoch']} "
+          f"({checkpoint['val_bits']:.3f} bits per code on validation)")
+
+    height, width = checkpoint["grid"]
+    batches = []
+    start = time.time()
+    for first in range(0, num_samples, batch_size):
+        count = min(batch_size, num_samples - first)
+        codes = prior.sample(count, height, width, device, temperature)
+        batches.append(vqvae.decode_indices(codes).clamp(0, 1).cpu())
+        print(f"  sampled {first + count}/{num_samples}", flush=True)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return torch.cat(batches), (time.time() - start) / num_samples
 
 
 def summarise(scores):
@@ -187,7 +219,7 @@ def evaluate_vqvae(args, device, weights, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
-    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae"], default="dcgan")
+    parser.add_argument("--model", choices=[*SAMPLE_MODELS, "vqvae"], default="dcgan")
     parser.add_argument("--weights", default=None,
                         help="Defaults to ~/hipmri_runs/<model>/<model>.pt")
     parser.add_argument("--root", default=DEFAULT_ROOT)
@@ -196,6 +228,8 @@ def main():
     parser.add_argument("--num-samples", type=int, default=256)
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N real slices per split (quick checks).")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -212,8 +246,12 @@ def main():
         evaluate_vqvae(args, device, weights, out_dir)
         return
 
-    generator = load_generator(weights, device)
-    samples, seconds_per_image = generate_samples(generator, args.num_samples, device)
+    if args.model == "pixelcnn":
+        samples, seconds_per_image = generate_from_prior(weights, args.num_samples, device,
+                                                         args.temperature)
+    else:
+        generator = load_generator(weights, device)
+        samples, seconds_per_image = generate_samples(generator, args.num_samples, device)
     print(f"Generated {len(samples)} samples, "
           f"{seconds_per_image * 1000:.2f} ms per image")
     save_image(samples[:32], os.path.join(out_dir, "samples_uncurated.png"), nrow=4)
@@ -235,6 +273,9 @@ def main():
     real_vs_train, _ = best_match_ssim(real, train_set.images, device,
                                        description="Real test vs train")
 
+    # Samples closer to a training slice than any unseen real patient is.
+    above_real_max = int((gen_vs_train > real_vs_train.max()).sum())
+
     results = {
         "model": args.model,
         "num_samples": len(samples),
@@ -242,6 +283,9 @@ def main():
         "generated_vs_test": summarise(gen_vs_test),
         "generated_vs_train": summarise(gen_vs_train),
         "real_test_vs_train": summarise(real_vs_train),
+        "count_above_real_max": above_real_max,
+        "pairwise_ssim_generated": mean_pairwise_ssim(samples, device),
+        "pairwise_ssim_real_test": mean_pairwise_ssim(real, device),
     }
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(results, f, indent=2)
@@ -252,6 +296,11 @@ def main():
         s = results[name]
         print(f"  {name:20s} {s['mean']:.3f}  {s['std']:.3f}  {s['min']:.3f}  "
               f"{s['max']:.3f}  {s['fraction_above_target']:.0%}")
+    print(f"\nSamples closer to training than any real test slice: "
+          f"{above_real_max}/{len(samples)}")
+    print(f"Mean pairwise SSIM (diversity, lower = more varied): generated "
+          f"{results['pairwise_ssim_generated']:.3f}, real test "
+          f"{results['pairwise_ssim_real_test']:.3f}")
 
     plot_nearest_neighbours(samples, gen_vs_train, nearest, train_set,
                             os.path.join(out_dir, "nearest_neighbours.png"))
@@ -262,3 +311,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    
