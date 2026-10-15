@@ -9,12 +9,14 @@ Usage:
     python3 train.py --model dcgan --epochs 100
     python3 train.py --model wgan_gp --epochs 500
     python3 train.py --model vqvae --epochs 100
+    python3 train.py --model pixelcnn --epochs 60   (needs the trained VQ-VAE)
 Quick check on a few slices:
     python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
 """
 
 import argparse
 import csv
+import math
 import os
 import time
 
@@ -24,13 +26,20 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, HipMRISlices, get_dataloaders
 from metrics import ssim_pairs
-from modules import LATENT_DIM, VQVAE, Critic, Discriminator, Generator, count_parameters
+from modules import (LATENT_DIM, VQVAE, Critic, Discriminator, Generator, PixelCNN,
+                     count_parameters)
 
-DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4}
+DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4, "pixelcnn": 3e-4}
+
+PIXELCNN_PANELS = [
+    {"title": "Prior negative log-likelihood", "ylabel": "Bits per code",
+     "series": [("train_bits", "Training"), ("val_bits", "Validation")]},
+]
 
 VQVAE_PANELS = [
     {"title": "Reconstruction error", "ylabel": "MSE",
@@ -339,9 +348,96 @@ def train_vqvae(args, device, out_dir):
     print(f"Best validation SSIM: {best_ssim:.3f}")
 
 
+def load_vqvae(weights, device):
+    """Load a trained VQ-VAE in evaluation mode."""
+    checkpoint = torch.load(weights, map_location=device)
+    vqvae = VQVAE(**checkpoint["config"]).to(device)
+    vqvae.load_state_dict(checkpoint["model"])
+    return vqvae.eval()
+
+
+@torch.no_grad()
+def encode_dataset(vqvae, dataset, device, batch_size=256):
+    """Encode every slice of a dataset into its (32, 64) grid of code indices."""
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    return torch.cat([vqvae.encode(batch.to(device)).cpu() for batch in loader])
+
+
+@torch.no_grad()
+def prior_loss(prior, codes, device, batch_size=64):
+    """Mean cross-entropy (nats per code) of a prior on a set of code grids."""
+    prior.eval()
+    total = 0.0
+    for start in range(0, len(codes), batch_size):
+        batch = codes[start:start + batch_size].to(device)
+        total += F.cross_entropy(prior(batch), batch, reduction="sum").item()
+    prior.train()
+    return total / codes.numel()
+
+
+def train_pixelcnn(args, device, out_dir):
+    """Train the PixelCNN prior on the code grids of the trained VQ-VAE."""
+    vqvae_weights = args.vqvae_weights or os.path.join(args.out_dir, "vqvae", "vqvae.pt")
+    vqvae = load_vqvae(vqvae_weights, device)
+    train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
+                                                  max_slices=args.max_slices)
+    train_codes = encode_dataset(vqvae, train_loader.dataset, device)
+    val_codes = encode_dataset(vqvae, val_loader.dataset, device)
+    height, width = train_codes.shape[1], train_codes.shape[2]
+    print(f"Encoded {len(train_codes)} training and {len(val_codes)} validation slices "
+          f"into {height} x {width} code grids")
+
+    code_loader = DataLoader(TensorDataset(train_codes), batch_size=args.batch_size,
+                             shuffle=True, drop_last=True)
+    if len(code_loader) == 0:
+        raise ValueError("No full batch available: lower --batch-size.")
+
+    prior = PixelCNN(vqvae.config["num_embeddings"], args.prior_dim, args.prior_layers).to(device)
+    print(f"PixelCNN parameters: {count_parameters(prior):,}")
+    optimiser = torch.optim.Adam(prior.parameters(), lr=args.lr)
+    history, best_loss = [], float("inf")
+
+    for epoch in range(1, args.epochs + 1):
+        prior.train()
+        start = time.time()
+        total = 0.0
+        for (codes,) in code_loader:
+            codes = codes.to(device)
+            loss = F.cross_entropy(prior(codes), codes)
+            optimiser.zero_grad(set_to_none=True)
+            loss.backward()
+            optimiser.step()
+            total += loss.item()
+
+        val_loss = prior_loss(prior, val_codes, device)
+        row: dict[str, float] = {"epoch": epoch,
+                                 "train_bits": total / len(code_loader) / math.log(2),
+                                 "val_bits": val_loss / math.log(2)}
+        history.append(row)
+        print_epoch(epoch, args.epochs, row, time.time() - start)
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            torch.save({"model": prior.state_dict(), "config": prior.config,
+                        "grid": (height, width),
+                        "vqvae_weights": vqvae_weights, "epoch": epoch,
+                        "val_bits": val_loss / math.log(2)},
+                       os.path.join(out_dir, "pixelcnn.pt"))
+
+        if epoch % args.sample_every == 0 or epoch == args.epochs:
+            sampled = prior.sample(8, height, width, device)
+            with torch.no_grad():
+                images = vqvae.decode_indices(sampled).clamp(0, 1)
+            save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"), nrow=4)
+            save_history(history, out_dir, PIXELCNN_PANELS)
+
+    print(f"Best validation: {best_loss / math.log(2):.3f} bits per code")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
-    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae"], default="dcgan")
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae", "pixelcnn"],
+                        default="dcgan")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default=os.path.expanduser("~/hipmri_runs"))
     parser.add_argument("--epochs", type=int, default=100)
@@ -359,6 +455,12 @@ def main():
                         help="VQ-VAE: length of each codebook vector.")
     parser.add_argument("--beta", type=float, default=0.25,
                         help="VQ-VAE: weight of the commitment loss.")
+    parser.add_argument("--vqvae-weights", default=None,
+                        help="PixelCNN: trained VQ-VAE, default <out-dir>/vqvae/vqvae.pt.")
+    parser.add_argument("--prior-dim", type=int, default=128,
+                        help="PixelCNN: channels per layer.")
+    parser.add_argument("--prior-layers", type=int, default=12,
+                        help="PixelCNN: number of gated layers.")
     parser.add_argument("--sample-every", type=int, default=5,
                         help="Save samples, weights and curves every N epochs.")
     parser.add_argument("--max-slices", type=int, default=None,
@@ -380,8 +482,10 @@ def main():
         train_dcgan(args, device, out_dir)
     elif args.model == "wgan_gp":
         train_wgan_gp(args, device, out_dir)
-    else:
+    elif args.model == "vqvae":
         train_vqvae(args, device, out_dir)
+    else:
+        train_pixelcnn(args, device, out_dir)
 
     if device.type == "cuda":
         print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
