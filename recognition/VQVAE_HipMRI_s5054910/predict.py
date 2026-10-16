@@ -1,21 +1,28 @@
 """
 predict.py - Generate slices from a trained model and evaluate them.
 
-For the GANs: generates an uncurated set of samples, times the generation,
-scores them with best-match SSIM against real slices, counts near-copies,
-measures diversity, and saves the memorisation-audit figures.
+For a generative model (dcgan, wgan_gp, pixelcnn for VQ-VAE + prior, pixelcnn2
+for VQ-VAE-2 + two priors): generates uncurated samples, times generation,
+and runs the sample audit, optionally repeated over several seeds:
+  * best-match SSIM of each sample against held-out real slices (fidelity) and
+    against the training set (closeness to training patients);
+  * the same for real held-out slices, as the reference for an unseen patient;
+  * near-copies: samples closer to a training slice than any held-out slice;
+  * diversity: mean pairwise SSIM at full and at 4x-reduced resolution.
+Held-out slices are the test and validation patients (7 patients), none of
+which the generative models were trained on.
 
-For the VQ-VAE: reconstructs every test slice, scores each against its own
-original with paired SSIM, and saves the best and worst reconstructions.
+For an autoencoder (vqvae, vqvae2): reconstructs every test slice, scores
+each against its own original with paired SSIM, and saves the best and worst.
 
-For the PixelCNN prior: samples new code grids, decodes them with the VQ-VAE,
-and runs the same sample audit as the GANs.
+--interpolate saves a latent interpolation figure (dcgan, wgan_gp, vqvae, vqvae2).
 
 Usage:
-    python3 predict.py --model dcgan
+    python3 predict.py --model dcgan --repeats 3
     python3 predict.py --model vqvae
-    python3 predict.py --model pixelcnn
-    python3 predict.py --model vqvae --interpolate   (also dcgan, wgan_gp)
+    python3 predict.py --model pixelcnn --run-name pixelcnn_reg --temperature 0.9 --repeats 3
+    python3 predict.py --model pixelcnn2 --repeats 3
+    python3 predict.py --model vqvae2 --interpolate
 """
 
 import argparse
@@ -27,14 +34,16 @@ import matplotlib
 matplotlib.use("Agg")  # no display on the cluster
 import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, HipMRISlices, check_no_patient_leakage
 from metrics import best_match_ssim, mean_pairwise_ssim, ssim_pairs
-from modules import VQVAE, Generator, PixelCNN
+from modules import VQVAE, VQVAE2, Generator, PixelCNN
 
 SSIM_TARGET = 0.6
-SAMPLE_MODELS = ("dcgan", "wgan_gp", "pixelcnn")
+SAMPLE_MODELS = ("dcgan", "wgan_gp", "pixelcnn", "pixelcnn2")
+AUTOENCODERS = ("vqvae", "vqvae2")
 
 
 def load_generator(weights_path, device):
@@ -46,47 +55,67 @@ def load_generator(weights_path, device):
     return generator
 
 
-@torch.no_grad()
-def generate_samples(generator, num_samples, device, batch_size=64):
-    """Generate images in [0, 1] and measure the time per image."""
-    generator(torch.randn(batch_size, generator.latent_dim, device=device))  # warm-up
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-
-    batches = []
-    start = time.time()
-    for first in range(0, num_samples, batch_size):
-        count = min(batch_size, num_samples - first)
-        noise = torch.randn(count, generator.latent_dim, device=device)
-        batches.append((generator(noise) + 1.0) / 2.0)
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    seconds_per_image = (time.time() - start) / num_samples
-    return torch.cat(batches).cpu(), seconds_per_image
+def load_autoencoder(weights_path, device):
+    """Rebuild a trained VQ-VAE or VQ-VAE-2 in evaluation mode."""
+    checkpoint = torch.load(weights_path, map_location=device)
+    kind = checkpoint.get("kind", "vqvae")
+    model = (VQVAE2 if kind == "vqvae2" else VQVAE)(**checkpoint["config"]).to(device)
+    model.load_state_dict(checkpoint["model"])
+    return model.eval(), checkpoint
 
 
-@torch.no_grad()
-def generate_from_prior(weights_path, num_samples, device, temperature=1.0, batch_size=64):
-    """Sample code grids from the PixelCNN prior and decode them with the VQ-VAE."""
+def load_prior(weights_path, device):
+    """Rebuild a trained PixelCNN prior in evaluation mode."""
     checkpoint = torch.load(weights_path, map_location=device)
     prior = PixelCNN(**checkpoint["config"]).to(device)
     prior.load_state_dict(checkpoint["model"])
-    prior.eval()
-    vq_checkpoint = torch.load(checkpoint["vqvae_weights"], map_location=device)
-    vqvae = VQVAE(**vq_checkpoint["config"]).to(device)
-    vqvae.load_state_dict(vq_checkpoint["model"])
-    vqvae.eval()
-    print(f"Loaded prior from epoch {checkpoint['epoch']} "
+    print(f"Loaded {checkpoint.get('level', 'single')} prior from epoch {checkpoint['epoch']} "
           f"({checkpoint['val_bits']:.3f} bits per code on validation)")
+    return prior.eval(), checkpoint
 
+
+def make_sampler(args, weights, device):
+    """Return a function that generates `count` images in [0, 1] from the chosen model."""
+    if args.model in ("dcgan", "wgan_gp"):
+        generator = load_generator(weights, device)
+
+        def sample_gan(count):
+            noise = torch.randn(count, generator.latent_dim, device=device)
+            return (generator(noise) + 1.0) / 2.0
+        return sample_gan
+
+    prior, checkpoint = load_prior(weights, device)
+    vqvae, _ = load_autoencoder(checkpoint["vqvae_weights"], device)
     height, width = checkpoint["grid"]
+
+    if args.model == "pixelcnn":
+        def sample_prior(count):
+            codes = prior.sample(count, height, width, device, args.temperature)
+            return vqvae.decode_levels([codes]).clamp(0, 1)
+        return sample_prior
+
+    # VQ-VAE-2: sample a top-level layout, then bottom-level detail conditioned on it.
+    top_weights = args.top_weights or os.path.expanduser(
+        "~/hipmri_runs/pixelcnn2_top/pixelcnn.pt")
+    top_prior, top_checkpoint = load_prior(top_weights, device)
+    top_height, top_width = top_checkpoint["grid"]
+
+    def sample_two_level(count):
+        top = top_prior.sample(count, top_height, top_width, device, args.temperature)
+        bottom = prior.sample(count, height, width, device, args.temperature, cond_codes=top)
+        return vqvae.decode_levels([top, bottom]).clamp(0, 1)
+    return sample_two_level
+
+
+@torch.no_grad()
+def generate(sampler, num_samples, batch_size, device):
+    """Generate num_samples images in batches and measure the time per image."""
     batches = []
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     start = time.time()
     for first in range(0, num_samples, batch_size):
-        count = min(batch_size, num_samples - first)
-        codes = prior.sample(count, height, width, device, temperature)
-        batches.append(vqvae.decode_indices(codes).clamp(0, 1).cpu())
-        print(f"  sampled {first + count}/{num_samples}", flush=True)
+        batches.append(sampler(min(batch_size, num_samples - first)).cpu())
     if device.type == "cuda":
         torch.cuda.synchronize()
     return torch.cat(batches), (time.time() - start) / num_samples
@@ -128,7 +157,7 @@ def plot_ssim_histogram(generated_scores, real_scores, path):
     high = max(generated_scores.max(), real_scores.max()).item()
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(real_scores.numpy(), bins=30, range=(low, high), histtype="step",
-            linewidth=2, color=blue, label="Unseen real slices (test patients)")
+            linewidth=2, color=blue, label="Held-out real slices (unseen patients)")
     ax.hist(generated_scores.numpy(), bins=30, range=(low, high), histtype="step",
             linewidth=2, color=orange, linestyle="--", label="Generated slices")
     ax.set(title="Similarity to the most similar training slice",
@@ -167,10 +196,7 @@ def plot_reconstructions(originals, recons, scores, test_set, path, count=3):
 @torch.no_grad()
 def evaluate_vqvae(args, device, weights, out_dir):
     """Reconstruct every test slice and score it against its own original."""
-    checkpoint = torch.load(weights, map_location=device)
-    model = VQVAE(**checkpoint["config"]).to(device)
-    model.load_state_dict(checkpoint["model"])
-    model.eval()
+    model, checkpoint = load_autoencoder(weights, device)
     print(f"Loaded epoch {checkpoint['epoch']} (validation SSIM {checkpoint['val_ssim']:.3f})")
 
     check_no_patient_leakage(args.root)
@@ -184,18 +210,19 @@ def evaluate_vqvae(args, device, weights, out_dir):
     start = time.time()
     for first in range(0, len(originals), 64):
         batch = originals[first:first + 64].to(device)
-        recon, _, indices = model(batch)
-        batches.append(recon.clamp(0, 1).cpu())
-        codes.append(indices.cpu())
+        batches.append(model(batch)[0].clamp(0, 1).cpu())
     if device.type == "cuda":
         torch.cuda.synchronize()
     ms_per_image = (time.time() - start) / len(originals) * 1000
 
     recons = torch.cat(batches)
     scores = ssim_pairs(recons, originals)
-    used = torch.cat(codes).unique().numel()
+    for first in range(0, len(originals), 64):
+        levels = model.encode_levels(originals[first:first + 64].to(device))
+        codes.append([level.cpu() for level in levels])
+    used = [torch.cat([batch[i] for batch in codes]).unique().numel() for i in range(len(codes[0]))]
     results = {
-        "model": "vqvae",
+        "model": args.model,
         "checkpoint_epoch": checkpoint["epoch"],
         "num_test_slices": len(originals),
         "ms_per_image": ms_per_image,
@@ -212,7 +239,8 @@ def evaluate_vqvae(args, device, weights, out_dir):
           f"std {s['std']:.3f}, min {s['min']:.3f}, max {s['max']:.3f}, "
           f"{s['fraction_above_target']:.0%} above {SSIM_TARGET}")
     print(f"Reconstruction MSE {results['reconstruction_mse']:.5f}, "
-          f"{ms_per_image:.2f} ms per image, {used}/{results['codebook_size']} codes used")
+          f"{ms_per_image:.2f} ms per image, codes used per level {used} "
+          f"of {results['codebook_size']}")
     plot_reconstructions(originals, recons, scores, test_set,
                          os.path.join(out_dir, "reconstructions.png"))
     print("Outputs saved to", out_dir)
@@ -250,18 +278,17 @@ def interpolate_gan(generator, device, num_pairs=4, steps=8):
 
 
 @torch.no_grad()
-def interpolate_vqvae(vqvae, test_set, pairs, device, steps=8):
-    """Blend two real slices' encoder outputs, re-quantise each blend, and decode it.
+def interpolate_autoencoder(model, test_set, pairs, device, steps=8):
+    """Blend two real slices in the model's latent space, re-quantise and decode each blend.
 
-    Also returns, for each step, the share of grid positions whose code changed.
+    Also returns, for each step, the share of (bottom) grid positions whose code changed.
     """
     rows, changes = [], []
     weights = torch.linspace(0, 1, steps, device=device).view(-1, 1, 1, 1)
     for first, second in pairs:
-        latents = vqvae.encoder(torch.stack([test_set[first], test_set[second]]).to(device))
-        blended = (1 - weights) * latents[0:1] + weights * latents[1:2]
-        quantized, _, codes = vqvae.quantizer(blended)
-        rows.append(vqvae.decoder(quantized).clamp(0, 1))
+        pair = torch.stack([test_set[first], test_set[second]]).to(device)
+        images, codes = model.interpolate(pair, weights)
+        rows.append(images.clamp(0, 1))
         changes.append((codes[1:] != codes[:-1]).float().mean(dim=(1, 2)))
     return torch.stack(rows).cpu(), torch.stack(changes).cpu()
 
@@ -284,14 +311,11 @@ def run_interpolation(args, device, weights, run_dir):
     os.makedirs(out_dir, exist_ok=True)
     results: dict = {"model": args.model}
 
-    if args.model == "vqvae":
-        checkpoint = torch.load(weights, map_location=device)
-        vqvae = VQVAE(**checkpoint["config"]).to(device)
-        vqvae.load_state_dict(checkpoint["model"])
-        vqvae.eval()
+    if args.model in AUTOENCODERS:
+        model, _ = load_autoencoder(weights, device)
         test_set = HipMRISlices(args.root, "test", max_slices=args.max_slices)
         pairs = interpolation_pairs(test_set)
-        rows, changes = interpolate_vqvae(vqvae, test_set, pairs, device)
+        rows, changes = interpolate_autoencoder(model, test_set, pairs, device)
         results["pairs"] = [[test_set.patient_of(a), test_set.patient_of(b)] for a, b in pairs]
         results["max_code_change_per_step"] = changes.max(dim=1).values.tolist()
     else:
@@ -322,21 +346,130 @@ def run_interpolation(args, device, weights, run_dir):
     print("Outputs saved to", out_dir)
 
 
+def audit_samples(samples, train_set, heldout, device, real_max):
+    """Best-match SSIM, near-copy count and diversity for one set of generated samples."""
+    gen_vs_heldout, _ = best_match_ssim(samples, heldout, device,
+                                        description="Generated vs held-out")
+    gen_vs_train, nearest = best_match_ssim(samples, train_set.images, device,
+                                            description="Generated vs train")
+    return {
+        "generated_vs_heldout": summarise(gen_vs_heldout),
+        "generated_vs_train": summarise(gen_vs_train),
+        # Samples closer to a training slice than any held-out real patient is.
+        "count_above_real_max": int((gen_vs_train > real_max).sum()),
+        "pairwise_ssim": mean_pairwise_ssim(samples, device),
+        "pairwise_ssim_coarse": mean_pairwise_ssim(coarse(samples), device),
+    }, gen_vs_train, nearest
+
+
+def coarse(images, factor=4):
+    """4x average-pooled images: diversity of overall layout, insensitive to fine artefacts."""
+    return F.avg_pool2d(images, factor)
+
+
+def mean_and_std(values):
+    tensor = torch.tensor(values, dtype=torch.float64)
+    return {"mean": tensor.mean().item(),
+            "std": tensor.std().item() if len(values) > 1 else 0.0,
+            "values": values}
+
+
+def run_sample_audit(args, device, weights, out_dir):
+    """Generate samples (over several seeds if --repeats > 1) and audit each set."""
+    sampler = make_sampler(args, weights, device)
+    batch_size = args.sample_batch if args.model.startswith("pixelcnn") else 64
+
+    check_no_patient_leakage(args.root)
+    train_set = HipMRISlices(args.root, "train", max_slices=args.max_slices)
+    heldout_sets = [HipMRISlices(args.root, split, max_slices=args.max_slices)
+                    for split in ("test", "validate")]
+    heldout = torch.cat([torch.stack([s[i] for i in range(len(s))]) for s in heldout_sets])
+    # Evenly spaced held-out slices: the reference for an unseen real patient.
+    picks = torch.linspace(0, len(heldout) - 1, min(args.num_samples, len(heldout))).long()
+    real = heldout[picks]
+    real_vs_train, _ = best_match_ssim(real, train_set.images, device,
+                                       description="Real held-out vs train")
+    real_max = real_vs_train.max()
+
+    runs, seconds_per_image = [], 0.0
+    for repeat in range(args.repeats):
+        torch.manual_seed(args.seed + repeat)
+        samples, seconds = generate(sampler, args.num_samples, batch_size, device)
+        if repeat == 0:
+            seconds_per_image = seconds
+            save_image(samples[:32], os.path.join(out_dir, "samples_uncurated.png"), nrow=4)
+        run, gen_vs_train, nearest = audit_samples(samples, train_set, heldout, device, real_max)
+        runs.append(run)
+        print(f"Seed {args.seed + repeat}: near-copies {run['count_above_real_max']}/"
+              f"{len(samples)}, vs train {run['generated_vs_train']['mean']:.3f}, "
+              f"vs held-out {run['generated_vs_heldout']['mean']:.3f}, "
+              f"pairwise {run['pairwise_ssim']:.3f} (coarse {run['pairwise_ssim_coarse']:.3f})",
+              flush=True)
+        if repeat == 0:
+            plot_nearest_neighbours(samples, gen_vs_train, nearest, train_set,
+                                    os.path.join(out_dir, "nearest_neighbours.png"))
+            plot_ssim_histogram(gen_vs_train, real_vs_train,
+                                os.path.join(out_dir, "ssim_histogram.png"))
+
+    results = {
+        "model": args.model,
+        "run": args.run_name or args.model,
+        "temperature": args.temperature,
+        "num_samples": args.num_samples,
+        "seeds": [args.seed + r for r in range(args.repeats)],
+        "ms_per_image": seconds_per_image * 1000,
+        "heldout_patients": len({s.patient_of(i) for s in heldout_sets for i in range(len(s))}),
+        "real_heldout_vs_train": summarise(real_vs_train),
+        "pairwise_ssim_real": mean_pairwise_ssim(real, device),
+        "pairwise_ssim_coarse_real": mean_pairwise_ssim(coarse(real), device),
+        "repeats": {
+            "count_above_real_max": mean_and_std([r["count_above_real_max"] for r in runs]),
+            "generated_vs_train_mean": mean_and_std([r["generated_vs_train"]["mean"] for r in runs]),
+            "generated_vs_train_max": mean_and_std([r["generated_vs_train"]["max"] for r in runs]),
+            "generated_vs_heldout_mean": mean_and_std(
+                [r["generated_vs_heldout"]["mean"] for r in runs]),
+            "pairwise_ssim": mean_and_std([r["pairwise_ssim"] for r in runs]),
+            "pairwise_ssim_coarse": mean_and_std([r["pairwise_ssim_coarse"] for r in runs]),
+        },
+        "per_seed": runs,
+    }
+    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
+        json.dump(results, f, indent=2)
+
+    r, s = results["repeats"], results["real_heldout_vs_train"]
+    print(f"\nGenerated {args.num_samples} samples per seed, "
+          f"{seconds_per_image * 1000:.2f} ms per image")
+    print(f"Reference: {results['heldout_patients']} held-out patients, best-match SSIM vs train "
+          f"mean {s['mean']:.3f}, max {s['max']:.3f}")
+    print(f"Over {args.repeats} seed(s), mean +/- std:")
+    for key in ("generated_vs_heldout_mean", "generated_vs_train_mean", "generated_vs_train_max",
+                "count_above_real_max", "pairwise_ssim", "pairwise_ssim_coarse"):
+        print(f"  {key:28s} {r[key]['mean']:.3f} +/- {r[key]['std']:.3f}")
+    print(f"  {'pairwise_ssim (real)':28s} {results['pairwise_ssim_real']:.3f}")
+    print(f"  {'pairwise_ssim_coarse (real)':28s} {results['pairwise_ssim_coarse_real']:.3f}")
+    print("Outputs saved to", out_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
-    parser.add_argument("--model", choices=[*SAMPLE_MODELS, "vqvae"], default="dcgan")
+    parser.add_argument("--model", choices=[*SAMPLE_MODELS, *AUTOENCODERS], default="dcgan")
     parser.add_argument("--weights", default=None,
-                        help="Defaults to ~/hipmri_runs/<model>/<model>.pt")
+                        help="Defaults to ~/hipmri_runs/<run>/<model>.pt (pixelcnn.pt for priors)")
+    parser.add_argument("--top-weights", default=None,
+                        help="pixelcnn2: top-level prior, "
+                             "default ~/hipmri_runs/pixelcnn2_top/pixelcnn.pt")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default=None,
-                        help="Defaults to ~/hipmri_runs/<model>/eval")
+                        help="Defaults to ~/hipmri_runs/<run>/eval")
     parser.add_argument("--num-samples", type=int, default=256)
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="Repeat sampling and the audit with this many seeds.")
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N real slices per split (quick checks).")
     parser.add_argument("--interpolate", action="store_true",
                         help="Save a latent interpolation figure instead of the usual evaluation.")
     parser.add_argument("--sample-batch", type=int, default=256,
-                        help="PixelCNN: grids sampled in parallel (larger = faster per image).")
+                        help="PixelCNN: grids sampled in parallel.")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
     parser.add_argument("--run-name", default=None,
@@ -345,7 +478,8 @@ def main():
     args = parser.parse_args()
 
     run_dir = os.path.expanduser(os.path.join("~/hipmri_runs", args.run_name or args.model))
-    weights = args.weights or os.path.join(run_dir, f"{args.model}.pt")
+    filename = "pixelcnn.pt" if args.model.startswith("pixelcnn") else f"{args.model}.pt"
+    weights = args.weights or os.path.join(run_dir, filename)
     eval_name = "eval" if args.temperature == 1.0 else f"eval_t{args.temperature:g}"
     out_dir = args.out_dir or os.path.join(run_dir, eval_name)
     os.makedirs(out_dir, exist_ok=True)
@@ -355,78 +489,14 @@ def main():
     print("Device:", device)
 
     if args.interpolate:
-        if args.model == "pixelcnn":
-            raise ValueError("Interpolation uses the VQ-VAE latent space: run with --model vqvae.")
+        if args.model.startswith("pixelcnn"):
+            raise ValueError("Interpolation uses the autoencoder's latent space: "
+                             "run with --model vqvae or vqvae2.")
         run_interpolation(args, device, weights, run_dir)
-        return
-
-    if args.model == "vqvae":
+    elif args.model in AUTOENCODERS:
         evaluate_vqvae(args, device, weights, out_dir)
-        return
-
-    if args.model == "pixelcnn":
-        samples, seconds_per_image = generate_from_prior(weights, args.num_samples, device,
-                                                         args.temperature, args.sample_batch)
     else:
-        generator = load_generator(weights, device)
-        samples, seconds_per_image = generate_samples(generator, args.num_samples, device)
-    print(f"Generated {len(samples)} samples, "
-          f"{seconds_per_image * 1000:.2f} ms per image")
-    save_image(samples[:32], os.path.join(out_dir, "samples_uncurated.png"), nrow=4)
-
-    check_no_patient_leakage(args.root)
-    train_set = HipMRISlices(args.root, "train", max_slices=args.max_slices)
-    test_set = HipMRISlices(args.root, "test", max_slices=args.max_slices)
-
-    # Evenly spaced test slices: the reference for how close *unseen real*
-    # patients sit to the training set.
-    count = min(args.num_samples, len(test_set))
-    picks = torch.linspace(0, len(test_set) - 1, count).long().tolist()
-    real = torch.stack([test_set[i] for i in picks])
-
-    gen_vs_test, _ = best_match_ssim(samples, test_set.images, device,
-                                     description="Generated vs test")
-    gen_vs_train, nearest = best_match_ssim(samples, train_set.images, device,
-                                            description="Generated vs train")
-    real_vs_train, _ = best_match_ssim(real, train_set.images, device,
-                                       description="Real test vs train")
-
-    # Samples closer to a training slice than any unseen real patient is.
-    above_real_max = int((gen_vs_train > real_vs_train.max()).sum())
-
-    results = {
-        "model": args.model,
-        "run": args.run_name or args.model,
-        "temperature": args.temperature,
-        "num_samples": len(samples),
-        "ms_per_image": seconds_per_image * 1000,
-        "generated_vs_test": summarise(gen_vs_test),
-        "generated_vs_train": summarise(gen_vs_train),
-        "real_test_vs_train": summarise(real_vs_train),
-        "count_above_real_max": above_real_max,
-        "pairwise_ssim_generated": mean_pairwise_ssim(samples, device),
-        "pairwise_ssim_real_test": mean_pairwise_ssim(real, device),
-    }
-    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
-        json.dump(results, f, indent=2)
-
-    print("\nBest-match SSIM (mean, std, min, max, share above "
-          f"{SSIM_TARGET})")
-    for name in ("generated_vs_test", "generated_vs_train", "real_test_vs_train"):
-        s = results[name]
-        print(f"  {name:20s} {s['mean']:.3f}  {s['std']:.3f}  {s['min']:.3f}  "
-              f"{s['max']:.3f}  {s['fraction_above_target']:.0%}")
-    print(f"\nSamples closer to training than any real test slice: "
-          f"{above_real_max}/{len(samples)}")
-    print(f"Mean pairwise SSIM (diversity, lower = more varied): generated "
-          f"{results['pairwise_ssim_generated']:.3f}, real test "
-          f"{results['pairwise_ssim_real_test']:.3f}")
-
-    plot_nearest_neighbours(samples, gen_vs_train, nearest, train_set,
-                            os.path.join(out_dir, "nearest_neighbours.png"))
-    plot_ssim_histogram(gen_vs_train, real_vs_train,
-                        os.path.join(out_dir, "ssim_histogram.png"))
-    print("Outputs saved to", out_dir)
+        run_sample_audit(args, device, weights, out_dir)
 
 
 if __name__ == "__main__":
