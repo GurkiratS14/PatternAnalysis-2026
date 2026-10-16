@@ -277,10 +277,11 @@ class GatedLayer(nn.Module):
     v_mask: torch.Tensor
     h_mask: torch.Tensor
 
-    def __init__(self, dim, kernel=7, first=False):
+    def __init__(self, dim, kernel=7, first=False, dropout=0.0):
         super().__init__()
         half = kernel // 2
         self.first = first
+        self.dropout = nn.Dropout(dropout)
         self.vertical = nn.Conv2d(dim, 2 * dim, (half + 1, kernel), padding=(half, half))
         self.horizontal = nn.Conv2d(dim, 2 * dim, (1, half + 1), padding=(0, half))
         self.vert_to_horiz = nn.Conv2d(2 * dim, 2 * dim, 1)
@@ -301,7 +302,7 @@ class GatedLayer(nn.Module):
         h_pre = F.conv2d(h, self.horizontal.weight * self.h_mask, self.horizontal.bias,
                          padding=self.horizontal.padding)[:, :, :, :width]
         v_out = gate(v_pre)
-        h_out = self.horiz_out(gate(h_pre + self.vert_to_horiz(v_pre)))
+        h_out = self.dropout(self.horiz_out(gate(h_pre + self.vert_to_horiz(v_pre))))
         if not self.first:
             h_out = h_out + h
         return v_out, h_out
@@ -315,12 +316,12 @@ class PixelCNN(nn.Module):
     before it in raster order (left to right, top to bottom).
     """
 
-    def __init__(self, num_embeddings=512, dim=128, num_layers=12, kernel=7):
+    def __init__(self, num_embeddings=512, dim=128, num_layers=12, kernel=7, dropout=0.0):
         super().__init__()
         self.config = {"num_embeddings": num_embeddings, "dim": dim,
-                       "num_layers": num_layers, "kernel": kernel}
+                       "num_layers": num_layers, "kernel": kernel, "dropout": dropout}
         self.embedding = nn.Embedding(num_embeddings, dim)
-        self.layers = nn.ModuleList([GatedLayer(dim, kernel, first=(i == 0))
+        self.layers = nn.ModuleList([GatedLayer(dim, kernel, first=(i == 0), dropout=dropout)
                                      for i in range(num_layers)])
         self.output = nn.Sequential(
             nn.Conv2d(dim, dim, 1), nn.ReLU(inplace=True),
