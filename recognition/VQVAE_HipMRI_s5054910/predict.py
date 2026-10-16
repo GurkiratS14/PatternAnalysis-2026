@@ -228,6 +228,8 @@ def main():
     parser.add_argument("--num-samples", type=int, default=256)
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N real slices per split (quick checks).")
+    parser.add_argument("--sample-batch", type=int, default=256,
+                        help="PixelCNN: grids sampled in parallel (larger = faster per image).")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
     parser.add_argument("--run-name", default=None,
@@ -251,7 +253,7 @@ def main():
 
     if args.model == "pixelcnn":
         samples, seconds_per_image = generate_from_prior(weights, args.num_samples, device,
-                                                         args.temperature)
+                                                         args.temperature, args.sample_batch)
     else:
         generator = load_generator(weights, device)
         samples, seconds_per_image = generate_samples(generator, args.num_samples, device)
