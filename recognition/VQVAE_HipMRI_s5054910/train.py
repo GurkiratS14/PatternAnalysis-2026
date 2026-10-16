@@ -10,6 +10,9 @@ Usage:
     python3 train.py --model wgan_gp --epochs 500
     python3 train.py --model vqvae --epochs 100
     python3 train.py --model pixelcnn --epochs 60   (needs the trained VQ-VAE)
+    python3 train.py --model vqvae2 --epochs 100
+    python3 train.py --model pixelcnn --level top --run-name pixelcnn2_top \
+        --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
 Quick check on a few slices:
     python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
 """
@@ -31,10 +34,11 @@ from torchvision.utils import save_image
 
 from dataset import DEFAULT_ROOT, HipMRISlices, get_dataloaders
 from metrics import ssim_pairs
-from modules import (LATENT_DIM, VQVAE, Critic, Discriminator, Generator, PixelCNN,
+from modules import (LATENT_DIM, VQVAE, VQVAE2, Critic, Discriminator, Generator, PixelCNN,
                      count_parameters)
 
-DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4, "pixelcnn": 3e-4}
+DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4, "vqvae2": 2e-4,
+              "pixelcnn": 3e-4}
 
 PIXELCNN_PANELS = [
     {"title": "Prior negative log-likelihood", "ylabel": "Bits per code",
@@ -48,6 +52,11 @@ VQVAE_PANELS = [
      "ylim": (0, 1), "hline": 0.6, "series": [("val_ssim", "Validation")]},
     {"title": "Codebook usage", "ylabel": "Codes used per epoch",
      "series": [("codes_used", "Codes used")]},
+]
+
+VQVAE2_PANELS = VQVAE_PANELS[:2] + [
+    {"title": "Codebook usage", "ylabel": "Codes used per epoch",
+     "series": [("codes_used", "Bottom"), ("top_codes_used", "Top")]},
 ]
 
 DCGAN_PANELS = [
@@ -281,15 +290,22 @@ def evaluate_reconstruction(model, loader, device):
     return total_mse / count, total_ssim / count
 
 
+def build_autoencoder(kind, config):
+    """Rebuild a VQ-VAE or VQ-VAE-2 from its saved configuration."""
+    return (VQVAE2 if kind == "vqvae2" else VQVAE)(**config)
+
+
 def train_vqvae(args, device, out_dir):
-    """Train the VQ-VAE on reconstruction, keeping the checkpoint with the best validation SSIM."""
+    """Train a VQ-VAE or VQ-VAE-2 on reconstruction, keeping the best validation-SSIM checkpoint."""
     train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
                                                   max_slices=args.max_slices)
     if len(train_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
 
-    model = VQVAE(args.codebook_size, args.embedding_dim, args.beta).to(device)
-    print(f"VQ-VAE parameters: {count_parameters(model):,}")
+    model = build_autoencoder(args.model, {"num_embeddings": args.codebook_size,
+                                           "embedding_dim": args.embedding_dim,
+                                           "beta": args.beta}).to(device)
+    print(f"{args.model} parameters: {count_parameters(model):,}")
     optimiser = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     val_set = val_loader.dataset
@@ -316,25 +332,29 @@ def train_vqvae(args, device, out_dir):
             totals["recon_loss"] += recon_loss.item()
             totals["vq_loss"] += vq_loss.item()
 
-        codes_used, perplexity = model.quantizer.usage_stats()
-        with torch.no_grad():
-            latents = model.encoder(last_batch)
-            latents = latents.permute(0, 2, 3, 1).reshape(-1, latents.size(1))
-        restarted = model.quantizer.reset_dead_codes(latents)
+        # Codebook statistics and dead-code restarts, per quantiser (one, or top and bottom).
+        stats = {}
+        latents = model.pre_quant_latents(last_batch)
+        for (name, quantizer), z in zip(model.quantizers(), latents):
+            prefix = f"{name}_" if name == "top" else ""
+            used, perplexity = quantizer.usage_stats()
+            flat = z.permute(0, 2, 3, 1).reshape(-1, z.size(1))
+            stats.update({f"{prefix}codes_used": used, f"{prefix}perplexity": perplexity,
+                          f"{prefix}restarted": quantizer.reset_dead_codes(flat)})
         val_mse, val_ssim = evaluate_reconstruction(model, val_loader, device)
 
         row: dict[str, float] = {"epoch": epoch}
         row.update({key: value / len(train_loader) for key, value in totals.items()})
-        row.update({"val_mse": val_mse, "val_ssim": val_ssim, "codes_used": codes_used,
-                    "perplexity": perplexity, "restarted": restarted})
+        row.update({"val_mse": val_mse, "val_ssim": val_ssim})
+        row.update(stats)
         history.append(row)
         print_epoch(epoch, args.epochs, row, time.time() - start)
 
         if val_ssim > best_ssim:
             best_ssim = val_ssim
-            torch.save({"model": model.state_dict(), "config": model.config,
+            torch.save({"model": model.state_dict(), "config": model.config, "kind": args.model,
                         "epoch": epoch, "val_ssim": val_ssim},
-                       os.path.join(out_dir, "vqvae.pt"))
+                       os.path.join(out_dir, f"{args.model}.pt"))
 
         if epoch % args.sample_every == 0 or epoch == args.epochs:
             model.eval()
@@ -343,57 +363,77 @@ def train_vqvae(args, device, out_dir):
             model.train()
             save_image(torch.cat([fixed, recon]),
                        os.path.join(out_dir, f"recon_epoch_{epoch:03d}.png"), nrow=8)
-            save_history(history, out_dir, VQVAE_PANELS)
+            save_history(history, out_dir,
+                         VQVAE2_PANELS if args.model == "vqvae2" else VQVAE_PANELS)
 
     print(f"Best validation SSIM: {best_ssim:.3f}")
 
 
 def load_vqvae(weights, device):
-    """Load a trained VQ-VAE in evaluation mode."""
+    """Load a trained VQ-VAE or VQ-VAE-2 in evaluation mode, and return it with its kind."""
     checkpoint = torch.load(weights, map_location=device)
-    vqvae = VQVAE(**checkpoint["config"]).to(device)
+    kind = checkpoint.get("kind", "vqvae")
+    vqvae = build_autoencoder(kind, checkpoint["config"]).to(device)
     vqvae.load_state_dict(checkpoint["model"])
-    return vqvae.eval()
+    return vqvae.eval(), kind
 
 
 @torch.no_grad()
 def encode_dataset(vqvae, dataset, device, batch_size=256):
-    """Encode every slice of a dataset into its (32, 64) grid of code indices."""
+    """Encode every slice into its code grids: one grid per level, each (N, H, W)."""
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    return torch.cat([vqvae.encode(batch.to(device)).cpu() for batch in loader])
+    levels = [vqvae.encode_levels(batch.to(device)) for batch in loader]
+    return [torch.cat([batch[i].cpu() for batch in levels]) for i in range(len(levels[0]))]
 
 
 @torch.no_grad()
-def prior_loss(prior, codes, device, batch_size=64):
+def prior_loss(prior, codes, cond, device, batch_size=64):
     """Mean cross-entropy (nats per code) of a prior on a set of code grids."""
     prior.eval()
     total = 0.0
     for start in range(0, len(codes), batch_size):
         batch = codes[start:start + batch_size].to(device)
-        total += F.cross_entropy(prior(batch), batch, reduction="sum").item()
+        context = cond[start:start + batch_size].to(device) if cond is not None else None
+        total += F.cross_entropy(prior(batch, context), batch, reduction="sum").item()
     prior.train()
     return total / codes.numel()
 
 
 def train_pixelcnn(args, device, out_dir):
-    """Train the PixelCNN prior on the code grids of the trained VQ-VAE."""
+    """Train a PixelCNN prior on the code grids of a trained VQ-VAE or VQ-VAE-2.
+
+    For VQ-VAE-2, --level top trains an unconditional prior over the 16 x 32 top
+    grids and --level bottom trains a prior over the 32 x 64 bottom grids that is
+    conditioned on the top grids.
+    """
     vqvae_weights = args.vqvae_weights or os.path.join(args.out_dir, "vqvae", "vqvae.pt")
-    vqvae = load_vqvae(vqvae_weights, device)
+    vqvae, kind = load_vqvae(vqvae_weights, device)
+    if kind == "vqvae2" and args.level not in ("top", "bottom"):
+        raise ValueError("A VQ-VAE-2 needs --level top or --level bottom.")
+    level = args.level if kind == "vqvae2" else "single"
+
     train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
                                                   max_slices=args.max_slices)
-    train_codes = encode_dataset(vqvae, train_loader.dataset, device)
-    val_codes = encode_dataset(vqvae, val_loader.dataset, device)
+    train_levels = encode_dataset(vqvae, train_loader.dataset, device)
+    val_levels = encode_dataset(vqvae, val_loader.dataset, device)
+    index = 0 if level == "top" else -1
+    train_codes, val_codes = train_levels[index], val_levels[index]
+    train_cond = train_levels[0] if level == "bottom" else None
+    val_cond = val_levels[0] if level == "bottom" else None
     height, width = train_codes.shape[1], train_codes.shape[2]
     print(f"Encoded {len(train_codes)} training and {len(val_codes)} validation slices "
-          f"into {height} x {width} code grids")
+          f"into {height} x {width} code grids ({level} level)")
 
-    code_loader = DataLoader(TensorDataset(train_codes), batch_size=args.batch_size,
+    tensors = (train_codes,) if train_cond is None else (train_codes, train_cond)
+    code_loader = DataLoader(TensorDataset(*tensors), batch_size=args.batch_size,
                              shuffle=True, drop_last=True)
     if len(code_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
 
-    prior = PixelCNN(vqvae.config["num_embeddings"], args.prior_dim, args.prior_layers,
-                     dropout=args.prior_dropout).to(device)
+    num_embeddings = vqvae.config["num_embeddings"]
+    prior = PixelCNN(num_embeddings, args.prior_dim, args.prior_layers,
+                     dropout=args.prior_dropout,
+                     cond_embeddings=num_embeddings if level == "bottom" else 0).to(device)
     print(f"PixelCNN parameters: {count_parameters(prior):,} "
           f"(dropout {args.prior_dropout}, weight decay {args.weight_decay})")
     # AdamW applies weight decay directly to the weights (Loshchilov and Hutter, 2019).
@@ -405,15 +445,16 @@ def train_pixelcnn(args, device, out_dir):
         prior.train()
         start = time.time()
         total = 0.0
-        for (codes,) in code_loader:
-            codes = codes.to(device)
-            loss = F.cross_entropy(prior(codes), codes)
+        for batch in code_loader:
+            codes = batch[0].to(device)
+            cond = batch[1].to(device) if len(batch) > 1 else None
+            loss = F.cross_entropy(prior(codes, cond), codes)
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             optimiser.step()
             total += loss.item()
 
-        val_loss = prior_loss(prior, val_codes, device)
+        val_loss = prior_loss(prior, val_codes, val_cond, device)
         row: dict[str, float] = {"epoch": epoch,
                                  "train_bits": total / len(code_loader) / math.log(2),
                                  "val_bits": val_loss / math.log(2)}
@@ -423,16 +464,26 @@ def train_pixelcnn(args, device, out_dir):
         if val_loss < best_loss:
             best_loss = val_loss
             torch.save({"model": prior.state_dict(), "config": prior.config,
-                        "grid": (height, width),
+                        "grid": (height, width), "level": level,
                         "vqvae_weights": vqvae_weights, "epoch": epoch,
                         "val_bits": val_loss / math.log(2)},
                        os.path.join(out_dir, "pixelcnn.pt"))
 
         if epoch % args.sample_every == 0 or epoch == args.epochs:
-            sampled = prior.sample(8, height, width, device)
-            with torch.no_grad():
-                images = vqvae.decode_indices(sampled).clamp(0, 1)
-            save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"), nrow=4)
+            if level == "single":
+                sampled = prior.sample(8, height, width, device)
+                with torch.no_grad():
+                    images = vqvae.decode_levels([sampled]).clamp(0, 1)
+                save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"),
+                           nrow=4)
+            elif level == "bottom" and val_cond is not None:
+                # New bottom detail generated for 8 real validation layouts.
+                top = val_cond[torch.linspace(0, len(val_cond) - 1, 8).long()].to(device)
+                sampled = prior.sample(8, height, width, device, cond_codes=top)
+                with torch.no_grad():
+                    images = vqvae.decode_levels([top, sampled]).clamp(0, 1)
+                save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"),
+                           nrow=4)
             save_history(history, out_dir, PIXELCNN_PANELS)
 
     print(f"Best validation: {best_loss / math.log(2):.3f} bits per code")
@@ -440,7 +491,7 @@ def train_pixelcnn(args, device, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
-    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae", "pixelcnn"],
+    parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae", "vqvae2", "pixelcnn"],
                         default="dcgan")
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default=os.path.expanduser("~/hipmri_runs"))
@@ -461,6 +512,8 @@ def main():
                         help="VQ-VAE: weight of the commitment loss.")
     parser.add_argument("--vqvae-weights", default=None,
                         help="PixelCNN: trained VQ-VAE, default <out-dir>/vqvae/vqvae.pt.")
+    parser.add_argument("--level", choices=["single", "top", "bottom"], default="single",
+                        help="PixelCNN: which VQ-VAE-2 level to model (single for a VQ-VAE).")
     parser.add_argument("--prior-dim", type=int, default=128,
                         help="PixelCNN: channels per layer.")
     parser.add_argument("--prior-dropout", type=float, default=0.0,
@@ -492,7 +545,7 @@ def main():
         train_dcgan(args, device, out_dir)
     elif args.model == "wgan_gp":
         train_wgan_gp(args, device, out_dir)
-    elif args.model == "vqvae":
+    elif args.model in ("vqvae", "vqvae2"):
         train_vqvae(args, device, out_dir)
     else:
         train_pixelcnn(args, device, out_dir)
