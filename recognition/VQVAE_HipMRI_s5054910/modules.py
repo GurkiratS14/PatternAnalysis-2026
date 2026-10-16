@@ -2,9 +2,10 @@
 modules.py - Model components for HipMRI image generation.
 
 Holds the DCGAN baseline (Radford et al., 2015), the WGAN-GP critic
-(Gulrajani et al., 2017), the VQ-VAE (van den Oord et al., 2017) and the
-gated PixelCNN prior over its codes (van den Oord et al., 2016), sized for
-1 x 128 x 256 slices. Both GANs share the same generator.
+(Gulrajani et al., 2017), the VQ-VAE (van den Oord et al., 2017), the
+two-level VQ-VAE-2 (Razavi et al., 2019) and the gated PixelCNN prior over
+their codes (van den Oord et al., 2016), sized for 1 x 128 x 256 slices.
+Both GANs share the same generator.
 
 Run this file directly to check output shapes and parameter counts:
     python3 modules.py
@@ -258,6 +259,117 @@ class VQVAE(nn.Module):
         """(B, 32, 64) code indices -> images."""
         return self.decoder(self.quantizer.lookup(indices))
 
+    # Interface shared with VQVAE2, so training and evaluation code handles both.
+    def quantizers(self):
+        return [("", self.quantizer)]
+
+    @torch.no_grad()
+    def pre_quant_latents(self, x):
+        return [self.encoder(x)]
+
+    @torch.no_grad()
+    def encode_levels(self, x):
+        return [self.encode(x)]
+
+    @torch.no_grad()
+    def decode_levels(self, levels):
+        return self.decode_indices(levels[-1])
+
+    @torch.no_grad()
+    def interpolate(self, pair, weights):
+        """Blend two images' encoder outputs, re-quantise, decode. Returns images and codes."""
+        latents = self.encoder(pair)
+        blended = (1 - weights) * latents[0:1] + weights * latents[1:2]
+        quantized, _, codes = self.quantizer(blended)
+        return self.decoder(quantized), codes
+
+
+class VQVAE2(nn.Module):
+    """Two-level VQ-VAE (Razavi et al., 2019).
+
+    A 16 x 32 top code grid captures global layout and a 32 x 64 bottom grid,
+    computed with the top level as context, captures local detail. The
+    decoder uses both. Each top code covers an 8 x 8 pixel patch, each bottom
+    code a 4 x 4 patch.
+    """
+
+    def __init__(self, num_embeddings=512, embedding_dim=64, beta=0.25, hidden=128,
+                 res_hidden=32):
+        super().__init__()
+        self.config = {"num_embeddings": num_embeddings, "embedding_dim": embedding_dim,
+                       "beta": beta, "hidden": hidden, "res_hidden": res_hidden}
+        self.enc_b = nn.Sequential(
+            nn.Conv2d(1, hidden // 2, 4, 2, 1), nn.ReLU(inplace=True),       # 64 x 128
+            nn.Conv2d(hidden // 2, hidden, 4, 2, 1), nn.ReLU(inplace=True),  # 32 x 64
+            nn.Conv2d(hidden, hidden, 3, 1, 1),
+            ResidualBlock(hidden, res_hidden), ResidualBlock(hidden, res_hidden), nn.ReLU(),
+        )
+        self.enc_t = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 4, 2, 1), nn.ReLU(inplace=True),       # 16 x 32
+            nn.Conv2d(hidden, hidden, 3, 1, 1),
+            ResidualBlock(hidden, res_hidden), ResidualBlock(hidden, res_hidden), nn.ReLU(),
+        )
+        self.pre_t = nn.Conv2d(hidden, embedding_dim, 1)
+        self.quantizer_t = VectorQuantizer(num_embeddings, embedding_dim, beta)
+        self.dec_t = nn.Sequential(
+            nn.Conv2d(embedding_dim, hidden, 3, 1, 1),
+            ResidualBlock(hidden, res_hidden), ResidualBlock(hidden, res_hidden), nn.ReLU(),
+            nn.ConvTranspose2d(hidden, embedding_dim, 4, 2, 1),               # 32 x 64
+        )
+        self.pre_b = nn.Conv2d(hidden + embedding_dim, embedding_dim, 1)
+        self.quantizer = VectorQuantizer(num_embeddings, embedding_dim, beta)  # bottom level
+        self.up_t = nn.ConvTranspose2d(embedding_dim, embedding_dim, 4, 2, 1)
+        self.decoder = Decoder(embedding_dim=2 * embedding_dim)
+
+    def _encode(self, x):
+        h_b = self.enc_b(x)
+        return self._from_bottom_features(h_b)
+
+    def _from_bottom_features(self, h_b):
+        z_t = self.pre_t(self.enc_t(h_b))
+        q_t, loss_t, codes_t = self.quantizer_t(z_t)
+        z_b = self.pre_b(torch.cat([h_b, self.dec_t(q_t)], dim=1))
+        return z_t, q_t, loss_t, codes_t, z_b
+
+    def _decode(self, q_t, q_b):
+        return self.decoder(torch.cat([self.up_t(q_t), q_b], dim=1))
+
+    def forward(self, x):
+        _, q_t, loss_t, _, z_b = self._encode(x)
+        q_b, loss_b, codes_b = self.quantizer(z_b)
+        return self._decode(q_t, q_b), loss_t + loss_b, codes_b
+
+    def quantizers(self):
+        return [("top", self.quantizer_t), ("bottom", self.quantizer)]
+
+    @torch.no_grad()
+    def pre_quant_latents(self, x):
+        was_training = self.training
+        self.eval()  # do not count these passes in codebook usage
+        z_t, _, _, _, z_b = self._encode(x)
+        self.train(was_training)
+        return [z_t, z_b]
+
+    @torch.no_grad()
+    def encode_levels(self, x):
+        """Images -> [(B, 16, 32) top codes, (B, 32, 64) bottom codes]."""
+        _, _, _, codes_t, z_b = self._encode(x)
+        return [codes_t, self.quantizer(z_b)[2]]
+
+    @torch.no_grad()
+    def decode_levels(self, levels):
+        codes_t, codes_b = levels
+        return self._decode(self.quantizer_t.lookup(codes_t), self.quantizer.lookup(codes_b))
+
+    @torch.no_grad()
+    def interpolate(self, pair, weights):
+        """Blend two images' bottom encoder features, then quantise both levels and decode."""
+        features = self.enc_b(pair)
+        blended = (1 - weights) * features[0:1] + weights * features[1:2]
+        _, q_t, _, _, z_b = self._from_bottom_features(blended)
+        q_b, _, codes_b = self.quantizer(z_b)
+        return self._decode(q_t, q_b), codes_b
+
 
 def gate(x):
     """Gated activation: tanh(first half) * sigmoid(second half) along channels."""
@@ -277,11 +389,14 @@ class GatedLayer(nn.Module):
     v_mask: torch.Tensor
     h_mask: torch.Tensor
 
-    def __init__(self, dim, kernel=7, first=False, dropout=0.0):
+    def __init__(self, dim, kernel=7, first=False, dropout=0.0, conditional=False):
         super().__init__()
         half = kernel // 2
         self.first = first
         self.dropout = nn.Dropout(dropout)
+        # Optional conditioning (e.g. on VQ-VAE-2 top-level codes), added before each gate.
+        self.cond_v = nn.Conv2d(dim, 2 * dim, 1) if conditional else None
+        self.cond_h = nn.Conv2d(dim, 2 * dim, 1) if conditional else None
         self.vertical = nn.Conv2d(dim, 2 * dim, (half + 1, kernel), padding=(half, half))
         self.horizontal = nn.Conv2d(dim, 2 * dim, (1, half + 1), padding=(0, half))
         self.vert_to_horiz = nn.Conv2d(2 * dim, 2 * dim, 1)
@@ -294,15 +409,19 @@ class GatedLayer(nn.Module):
         self.register_buffer("v_mask", v_mask)
         self.register_buffer("h_mask", h_mask)
 
-    def forward(self, v, h):
+    def forward(self, v, h, cond=None):
         height, width = v.shape[-2:]
         # Pad then crop, so each output only sees rows above / columns to the left.
         v_pre = F.conv2d(v, self.vertical.weight * self.v_mask, self.vertical.bias,
                          padding=self.vertical.padding)[:, :, :height]
         h_pre = F.conv2d(h, self.horizontal.weight * self.h_mask, self.horizontal.bias,
                          padding=self.horizontal.padding)[:, :, :, :width]
+        h_pre = h_pre + self.vert_to_horiz(v_pre)
+        if cond is not None and self.cond_v is not None and self.cond_h is not None:
+            v_pre = v_pre + self.cond_v(cond)
+            h_pre = h_pre + self.cond_h(cond)
         v_out = gate(v_pre)
-        h_out = self.dropout(self.horiz_out(gate(h_pre + self.vert_to_horiz(v_pre))))
+        h_out = self.dropout(self.horiz_out(gate(h_pre)))
         if not self.first:
             h_out = h_out + h
         return v_out, h_out
@@ -316,33 +435,56 @@ class PixelCNN(nn.Module):
     before it in raster order (left to right, top to bottom).
     """
 
-    def __init__(self, num_embeddings=512, dim=128, num_layers=12, kernel=7, dropout=0.0):
+    def __init__(self, num_embeddings=512, dim=128, num_layers=12, kernel=7, dropout=0.0,
+                 cond_embeddings=0):
         super().__init__()
         self.config = {"num_embeddings": num_embeddings, "dim": dim,
-                       "num_layers": num_layers, "kernel": kernel, "dropout": dropout}
+                       "num_layers": num_layers, "kernel": kernel, "dropout": dropout,
+                       "cond_embeddings": cond_embeddings}
         self.embedding = nn.Embedding(num_embeddings, dim)
-        self.layers = nn.ModuleList([GatedLayer(dim, kernel, first=(i == 0), dropout=dropout)
+        conditional = cond_embeddings > 0
+        self.layers = nn.ModuleList([GatedLayer(dim, kernel, first=(i == 0), dropout=dropout,
+                                                conditional=conditional)
                                      for i in range(num_layers)])
         self.output = nn.Sequential(
             nn.Conv2d(dim, dim, 1), nn.ReLU(inplace=True),
             nn.Conv2d(dim, num_embeddings, 1),
         )
+        # Conditioning network: a coarser code grid, upsampled 2x to this grid's size.
+        self.cond_net = None
+        if conditional:
+            self.cond_embedding = nn.Embedding(cond_embeddings, dim)
+            self.cond_net = nn.Sequential(
+                nn.ConvTranspose2d(dim, dim, 4, 2, 1), nn.ReLU(inplace=True),
+                ResidualBlock(dim, dim // 2), ResidualBlock(dim, dim // 2),
+            )
 
-    def forward(self, codes):
+    def condition(self, cond_codes):
+        """Features from the conditioning codes at this prior's resolution (no causality limit)."""
+        if self.cond_net is None or cond_codes is None:
+            return None
+        return self.cond_net(self.cond_embedding(cond_codes).permute(0, 3, 1, 2))
+
+    def forward(self, codes, cond_codes=None, cond=None):
         x = self.embedding(codes).permute(0, 3, 1, 2)
+        if cond is None:
+            cond = self.condition(cond_codes)
+        if cond is not None:
+            cond = cond[:, :, :codes.size(1)]  # match a row-cropped input during sampling
         v, h = x, x
         for layer in self.layers:
-            v, h = layer(v, h)
+            v, h = layer(v, h, cond)
         return self.output(h)
 
     @torch.no_grad()
-    def sample(self, count, height, width, device, temperature=1.0):
+    def sample(self, count, height, width, device, temperature=1.0, cond_codes=None):
         """Sample code grids one position at a time in raster order."""
         codes = torch.zeros(count, height, width, dtype=torch.long, device=device)
+        cond = self.condition(cond_codes)
         for row in range(height):
             for col in range(width):
                 # Rows below the current one cannot affect it, so they are skipped.
-                logits = self(codes[:, :row + 1])[:, :, row, col]
+                logits = self(codes[:, :row + 1], cond=cond)[:, :, row, col]
                 probs = F.softmax(logits / temperature, dim=1)
                 codes[:, row, col] = torch.multinomial(probs, 1).squeeze(1)
         return codes
@@ -358,6 +500,13 @@ if __name__ == "__main__":
     recon, vq_loss, codes = vqvae(images)
     print("VQ-VAE reconstruction:", tuple(recon.shape), "codes:", tuple(codes.shape))
     print(f"VQ-VAE parameters: {count_parameters(vqvae):,}")
+
+    vqvae2 = VQVAE2()
+    recon, _, _ = vqvae2(images)
+    top, bottom = vqvae2.encode_levels(images)
+    print("VQ-VAE-2 reconstruction:", tuple(recon.shape),
+          "top codes:", tuple(top.shape), "bottom codes:", tuple(bottom.shape))
+    print(f"VQ-VAE-2 parameters: {count_parameters(vqvae2):,}")
 
     generator, discriminator, critic = Generator(), Discriminator(), Critic()
     noise = torch.randn(4, LATENT_DIM)
