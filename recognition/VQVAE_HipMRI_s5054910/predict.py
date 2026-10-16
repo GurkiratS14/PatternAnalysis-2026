@@ -230,12 +230,15 @@ def main():
                         help="Use only the first N real slices per split (quick checks).")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
+    parser.add_argument("--run-name", default=None,
+                        help="Run folder under ~/hipmri_runs, default the model name.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    run_dir = os.path.expanduser(os.path.join("~/hipmri_runs", args.model))
+    run_dir = os.path.expanduser(os.path.join("~/hipmri_runs", args.run_name or args.model))
     weights = args.weights or os.path.join(run_dir, f"{args.model}.pt")
-    out_dir = args.out_dir or os.path.join(run_dir, "eval")
+    eval_name = "eval" if args.temperature == 1.0 else f"eval_t{args.temperature:g}"
+    out_dir = args.out_dir or os.path.join(run_dir, eval_name)
     os.makedirs(out_dir, exist_ok=True)
 
     torch.manual_seed(args.seed)
@@ -278,6 +281,8 @@ def main():
 
     results = {
         "model": args.model,
+        "run": args.run_name or args.model,
+        "temperature": args.temperature,
         "num_samples": len(samples),
         "ms_per_image": seconds_per_image * 1000,
         "generated_vs_test": summarise(gen_vs_test),
@@ -311,5 +316,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    
