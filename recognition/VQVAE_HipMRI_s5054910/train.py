@@ -392,9 +392,13 @@ def train_pixelcnn(args, device, out_dir):
     if len(code_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
 
-    prior = PixelCNN(vqvae.config["num_embeddings"], args.prior_dim, args.prior_layers).to(device)
-    print(f"PixelCNN parameters: {count_parameters(prior):,}")
-    optimiser = torch.optim.Adam(prior.parameters(), lr=args.lr)
+    prior = PixelCNN(vqvae.config["num_embeddings"], args.prior_dim, args.prior_layers,
+                     dropout=args.prior_dropout).to(device)
+    print(f"PixelCNN parameters: {count_parameters(prior):,} "
+          f"(dropout {args.prior_dropout}, weight decay {args.weight_decay})")
+    # AdamW applies weight decay directly to the weights (Loshchilov and Hutter, 2019).
+    optimiser = torch.optim.AdamW(prior.parameters(), lr=args.lr,
+                                  weight_decay=args.weight_decay)
     history, best_loss = [], float("inf")
 
     for epoch in range(1, args.epochs + 1):
@@ -459,6 +463,12 @@ def main():
                         help="PixelCNN: trained VQ-VAE, default <out-dir>/vqvae/vqvae.pt.")
     parser.add_argument("--prior-dim", type=int, default=128,
                         help="PixelCNN: channels per layer.")
+    parser.add_argument("--prior-dropout", type=float, default=0.0,
+                        help="PixelCNN: dropout probability in each gated layer.")
+    parser.add_argument("--weight-decay", type=float, default=0.0,
+                        help="PixelCNN: AdamW weight decay.")
+    parser.add_argument("--run-name", default=None,
+                        help="Output sub-folder, default the model name (e.g. pixelcnn_reg).")
     parser.add_argument("--prior-layers", type=int, default=12,
                         help="PixelCNN: number of gated layers.")
     parser.add_argument("--sample-every", type=int, default=5,
@@ -472,7 +482,7 @@ def main():
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dir = os.path.join(args.out_dir, args.model)
+    out_dir = os.path.join(args.out_dir, args.run_name or args.model)
     os.makedirs(out_dir, exist_ok=True)
     print("Device:", device)
     if device.type == "cuda":
