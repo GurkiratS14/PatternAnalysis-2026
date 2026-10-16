@@ -15,6 +15,7 @@ Usage:
     python3 predict.py --model dcgan
     python3 predict.py --model vqvae
     python3 predict.py --model pixelcnn
+    python3 predict.py --model vqvae --interpolate   (also dcgan, wgan_gp)
 """
 
 import argparse
@@ -217,6 +218,110 @@ def evaluate_vqvae(args, device, weights, out_dir):
     print("Outputs saved to", out_dir)
 
 
+def slerp(start, end, t):
+    """Spherical interpolation between two noise vectors (keeps them at a typical length)."""
+    omega = torch.acos((start / start.norm() * end / end.norm()).sum().clamp(-1, 1))
+    if omega.abs() < 1e-6:
+        return (1 - t) * start + t * end
+    return (torch.sin((1 - t) * omega) * start + torch.sin(t * omega) * end) / torch.sin(omega)
+
+
+def interpolation_pairs(test_set):
+    """Mid-level slices of each test patient, paired across patients, plus one within-patient pair."""
+    by_patient = {}
+    for index in range(len(test_set)):
+        by_patient.setdefault(test_set.patient_of(index), []).append(index)
+    groups = list(by_patient.values())
+    mids = [group[len(group) // 2] for group in groups]
+    pairs = list(zip(mids, mids[1:])) + [(mids[0], mids[-1])]
+    pairs.append((groups[0][len(groups[0]) // 4], groups[0][3 * len(groups[0]) // 4]))
+    return list(dict.fromkeys(pairs))  # drop duplicates, keep order
+
+
+@torch.no_grad()
+def interpolate_gan(generator, device, num_pairs=4, steps=8):
+    """Generate images along slerp paths between random pairs of noise vectors."""
+    rows = []
+    for _ in range(num_pairs):
+        start, end = torch.randn(2, generator.latent_dim, device=device)
+        noise = torch.stack([slerp(start, end, t) for t in torch.linspace(0, 1, steps)])
+        rows.append((generator(noise) + 1.0) / 2.0)
+    return torch.stack(rows).cpu()
+
+
+@torch.no_grad()
+def interpolate_vqvae(vqvae, test_set, pairs, device, steps=8):
+    """Blend two real slices' encoder outputs, re-quantise each blend, and decode it.
+
+    Also returns, for each step, the share of grid positions whose code changed.
+    """
+    rows, changes = [], []
+    weights = torch.linspace(0, 1, steps, device=device).view(-1, 1, 1, 1)
+    for first, second in pairs:
+        latents = vqvae.encoder(torch.stack([test_set[first], test_set[second]]).to(device))
+        blended = (1 - weights) * latents[0:1] + weights * latents[1:2]
+        quantized, _, codes = vqvae.quantizer(blended)
+        rows.append(vqvae.decoder(quantized).clamp(0, 1))
+        changes.append((codes[1:] != codes[:-1]).float().mean(dim=(1, 2)))
+    return torch.stack(rows).cpu(), torch.stack(changes).cpu()
+
+
+def step_similarity(rows):
+    """SSIM between consecutive frames of each interpolation path: (paths, steps - 1)."""
+    return torch.stack([ssim_pairs(row[:-1], row[1:]) for row in rows])
+
+
+def crossfade(rows):
+    """Pixel-space fade between each path's first and last frame, as a reference."""
+    steps = rows.size(1)
+    weights = torch.linspace(0, 1, steps).view(1, -1, 1, 1, 1)
+    return (1 - weights) * rows[:, :1] + weights * rows[:, -1:]
+
+
+def run_interpolation(args, device, weights, run_dir):
+    """Latent interpolation figure and smoothness statistics for one model."""
+    out_dir = os.path.join(run_dir, "interpolation")
+    os.makedirs(out_dir, exist_ok=True)
+    results: dict = {"model": args.model}
+
+    if args.model == "vqvae":
+        checkpoint = torch.load(weights, map_location=device)
+        vqvae = VQVAE(**checkpoint["config"]).to(device)
+        vqvae.load_state_dict(checkpoint["model"])
+        vqvae.eval()
+        test_set = HipMRISlices(args.root, "test", max_slices=args.max_slices)
+        pairs = interpolation_pairs(test_set)
+        rows, changes = interpolate_vqvae(vqvae, test_set, pairs, device)
+        results["pairs"] = [[test_set.patient_of(a), test_set.patient_of(b)] for a, b in pairs]
+        results["max_code_change_per_step"] = changes.max(dim=1).values.tolist()
+    else:
+        rows = interpolate_gan(load_generator(weights, device), device)
+
+    fades = crossfade(rows)
+    model_steps, fade_steps = step_similarity(rows), step_similarity(fades)
+    results.update({
+        "model_step_ssim_mean": model_steps.mean().item(),
+        "model_step_ssim_min": model_steps.min().item(),
+        "crossfade_step_ssim_mean": fade_steps.mean().item(),
+        "crossfade_step_ssim_min": fade_steps.min().item(),
+        "model_step_ssim_per_path": model_steps.tolist(),
+    })
+    with open(os.path.join(out_dir, "interpolation.json"), "w") as f:
+        json.dump(results, f, indent=2)
+
+    # Each model path, followed by the pixel cross-fade between the same two end frames.
+    grid = torch.stack([rows, fades], dim=1).flatten(0, 2)
+    save_image(grid, os.path.join(out_dir, "interpolation.png"), nrow=rows.size(1), padding=4,
+               pad_value=1.0)
+    print(f"Consecutive-frame SSIM: model mean {results['model_step_ssim_mean']:.3f}, "
+          f"min {results['model_step_ssim_min']:.3f}; cross-fade mean "
+          f"{results['crossfade_step_ssim_mean']:.3f}, min {results['crossfade_step_ssim_min']:.3f}")
+    if "max_code_change_per_step" in results:
+        print("Largest share of codes changing in one step, per path:",
+              ", ".join(f"{c:.0%}" for c in results["max_code_change_per_step"]))
+    print("Outputs saved to", out_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
     parser.add_argument("--model", choices=[*SAMPLE_MODELS, "vqvae"], default="dcgan")
@@ -228,6 +333,8 @@ def main():
     parser.add_argument("--num-samples", type=int, default=256)
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N real slices per split (quick checks).")
+    parser.add_argument("--interpolate", action="store_true",
+                        help="Save a latent interpolation figure instead of the usual evaluation.")
     parser.add_argument("--sample-batch", type=int, default=256,
                         help="PixelCNN: grids sampled in parallel (larger = faster per image).")
     parser.add_argument("--temperature", type=float, default=1.0,
@@ -246,6 +353,12 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
+
+    if args.interpolate:
+        if args.model == "pixelcnn":
+            raise ValueError("Interpolation uses the VQ-VAE latent space: run with --model vqvae.")
+        run_interpolation(args, device, weights, run_dir)
+        return
 
     if args.model == "vqvae":
         evaluate_vqvae(args, device, weights, out_dir)
