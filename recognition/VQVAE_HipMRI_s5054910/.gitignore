@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.out
+*.err
+*.pt
+*.pth
+hipmri_runs/
+.DS_Store
