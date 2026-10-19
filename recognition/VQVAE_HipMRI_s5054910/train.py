@@ -490,6 +490,7 @@ def train_pixelcnn(args, device, out_dir):
 
 
 def main():
+    """Parse command-line arguments and train the requested model."""
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
     parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae", "vqvae2", "pixelcnn"],
                         default="dcgan")

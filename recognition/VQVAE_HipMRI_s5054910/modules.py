@@ -80,6 +80,7 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, z):
+        """(B, latent_dim) noise -> (B, 1, 128, 256) images in [-1, 1]."""
         return self.net(z.view(z.size(0), self.latent_dim, 1, 1))
 
 
@@ -100,6 +101,7 @@ class Discriminator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
+        """(B, 1, 128, 256) images -> (B,) real/fake logits."""
         return self.net(x).view(-1)
 
 
@@ -124,6 +126,7 @@ class Critic(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
+        """(B, 1, 128, 256) images -> (B,) critic scores."""
         return self.net(x).view(-1)
 
 
@@ -140,6 +143,7 @@ class ResidualBlock(nn.Module):
         )
 
     def forward(self, x):
+        """Skip connection: input plus the residual branch."""
         return x + self.block(x)
 
 
@@ -158,6 +162,7 @@ class Encoder(nn.Module):
         )
 
     def forward(self, x):
+        """(B, 1, 128, 256) images -> (B, embedding_dim, 32, 64) latents."""
         return self.net(x)
 
 
@@ -175,6 +180,7 @@ class Decoder(nn.Module):
         )
 
     def forward(self, z):
+        """(B, embedding_dim, 32, 64) latents -> (B, 1, 128, 256) images."""
         return self.net(z)
 
 
@@ -196,6 +202,7 @@ class VectorQuantizer(nn.Module):
         self.register_buffer("usage", torch.zeros(num_embeddings))
 
     def forward(self, z):
+        """(B, D, H, W) latents -> quantised latents, VQ loss, (B, H, W) code indices."""
         b, d, h, w = z.shape
         flat = z.permute(0, 2, 3, 1).reshape(-1, d)
         codes = self.codebook.weight
@@ -246,6 +253,7 @@ class VQVAE(nn.Module):
         self.decoder = Decoder(embedding_dim=embedding_dim)
 
     def forward(self, x):
+        """Images -> reconstruction, VQ loss and code indices."""
         quantized, vq_loss, indices = self.quantizer(self.encoder(x))
         return self.decoder(quantized), vq_loss, indices
 
@@ -261,18 +269,22 @@ class VQVAE(nn.Module):
 
     # Interface shared with VQVAE2, so training and evaluation code handles both.
     def quantizers(self):
+        """(level name, quantiser) pairs; a VQ-VAE has one level."""
         return [("", self.quantizer)]
 
     @torch.no_grad()
     def pre_quant_latents(self, x):
+        """Encoder outputs before quantisation, one per level."""
         return [self.encoder(x)]
 
     @torch.no_grad()
     def encode_levels(self, x):
+        """Images -> list of code grids, one per level."""
         return [self.encode(x)]
 
     @torch.no_grad()
     def decode_levels(self, levels):
+        """List of code grids (one per level) -> images."""
         return self.decode_indices(levels[-1])
 
     @torch.no_grad()
@@ -322,28 +334,34 @@ class VQVAE2(nn.Module):
         self.decoder = Decoder(embedding_dim=2 * embedding_dim)
 
     def _encode(self, x):
+        """Images -> top latent, quantised top, top VQ loss, top codes, bottom latent."""
         h_b = self.enc_b(x)
         return self._from_bottom_features(h_b)
 
     def _from_bottom_features(self, h_b):
+        """Bottom features -> quantised top level and the bottom latent conditioned on it."""
         z_t = self.pre_t(self.enc_t(h_b))
         q_t, loss_t, codes_t = self.quantizer_t(z_t)
         z_b = self.pre_b(torch.cat([h_b, self.dec_t(q_t)], dim=1))
         return z_t, q_t, loss_t, codes_t, z_b
 
     def _decode(self, q_t, q_b):
+        """Upsample the top level, join it with the bottom level and decode to images."""
         return self.decoder(torch.cat([self.up_t(q_t), q_b], dim=1))
 
     def forward(self, x):
+        """Images -> reconstruction, summed VQ loss of both levels, bottom code indices."""
         _, q_t, loss_t, _, z_b = self._encode(x)
         q_b, loss_b, codes_b = self.quantizer(z_b)
         return self._decode(q_t, q_b), loss_t + loss_b, codes_b
 
     def quantizers(self):
+        """(level name, quantiser) pairs for the top and bottom levels."""
         return [("top", self.quantizer_t), ("bottom", self.quantizer)]
 
     @torch.no_grad()
     def pre_quant_latents(self, x):
+        """Top and bottom latents before quantisation (usage is not counted)."""
         was_training = self.training
         self.eval()  # do not count these passes in codebook usage
         z_t, _, _, _, z_b = self._encode(x)
@@ -358,6 +376,7 @@ class VQVAE2(nn.Module):
 
     @torch.no_grad()
     def decode_levels(self, levels):
+        """[top codes, bottom codes] -> images."""
         codes_t, codes_b = levels
         return self._decode(self.quantizer_t.lookup(codes_t), self.quantizer.lookup(codes_b))
 
@@ -410,6 +429,7 @@ class GatedLayer(nn.Module):
         self.register_buffer("h_mask", h_mask)
 
     def forward(self, v, h, cond=None):
+        """Advance the vertical and horizontal stacks by one layer, adding optional conditioning."""
         height, width = v.shape[-2:]
         # Pad then crop, so each output only sees rows above / columns to the left.
         v_pre = F.conv2d(v, self.vertical.weight * self.v_mask, self.vertical.bias,
@@ -466,6 +486,7 @@ class PixelCNN(nn.Module):
         return self.cond_net(self.cond_embedding(cond_codes).permute(0, 3, 1, 2))
 
     def forward(self, codes, cond_codes=None, cond=None):
+        """(B, H, W) codes -> (B, num_embeddings, H, W) logits for each position."""
         x = self.embedding(codes).permute(0, 3, 1, 2)
         if cond is None:
             cond = self.condition(cond_codes)

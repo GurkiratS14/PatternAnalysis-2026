@@ -80,6 +80,7 @@ def make_sampler(args, weights, device):
         generator = load_generator(weights, device)
 
         def sample_gan(count):
+            """Draw `count` generator samples, rescaled from [-1, 1] to [0, 1]."""
             noise = torch.randn(count, generator.latent_dim, device=device)
             return (generator(noise) + 1.0) / 2.0
         return sample_gan
@@ -90,6 +91,7 @@ def make_sampler(args, weights, device):
 
     if args.model == "pixelcnn":
         def sample_prior(count):
+            """Sample `count` code grids from the prior and decode them."""
             codes = prior.sample(count, height, width, device, args.temperature)
             return vqvae.decode_levels([codes]).clamp(0, 1)
         return sample_prior
@@ -101,6 +103,7 @@ def make_sampler(args, weights, device):
     top_height, top_width = top_checkpoint["grid"]
 
     def sample_two_level(count):
+        """Sample a top layout, then bottom detail conditioned on it, and decode."""
         top = top_prior.sample(count, top_height, top_width, device, args.temperature)
         bottom = prior.sample(count, height, width, device, args.temperature, cond_codes=top)
         return vqvae.decode_levels([top, bottom]).clamp(0, 1)
@@ -179,8 +182,8 @@ def plot_reconstructions(originals, recons, scores, test_set, path, count=3):
         label = "Best" if column < count else "Worst"
         error = (originals[index, 0] - recons[index, 0]).abs()
         axes[0, column].imshow(originals[index, 0], cmap="gray", vmin=0, vmax=1)
-        axes[0, column].set_title(f"{label}: {test_set.patient_of(index)}\nSSIM {scores[index]:.2f}",
-                                  fontsize=10)
+        title = f"{label}: {test_set.patient_of(index)}\nSSIM {scores[index]:.2f}"
+        axes[0, column].set_title(title, fontsize=10)
         axes[1, column].imshow(recons[index, 0], cmap="gray", vmin=0, vmax=1)
         axes[2, column].imshow(error, cmap="magma", vmin=0, vmax=0.5)
     for ax in axes.flat:
@@ -255,7 +258,7 @@ def slerp(start, end, t):
 
 
 def interpolation_pairs(test_set):
-    """Mid-level slices of each test patient, paired across patients, plus one within-patient pair."""
+    """Mid-level test slices paired across patients, plus one within-patient pair."""
     by_patient = {}
     for index in range(len(test_set)):
         by_patient.setdefault(test_set.patient_of(index), []).append(index)
@@ -339,7 +342,8 @@ def run_interpolation(args, device, weights, run_dir):
                pad_value=1.0)
     print(f"Consecutive-frame SSIM: model mean {results['model_step_ssim_mean']:.3f}, "
           f"min {results['model_step_ssim_min']:.3f}; cross-fade mean "
-          f"{results['crossfade_step_ssim_mean']:.3f}, min {results['crossfade_step_ssim_min']:.3f}")
+          f"{results['crossfade_step_ssim_mean']:.3f}, "
+          f"min {results['crossfade_step_ssim_min']:.3f}")
     if "max_code_change_per_step" in results:
         print("Largest share of codes changing in one step, per path:",
               ", ".join(f"{c:.0%}" for c in results["max_code_change_per_step"]))
@@ -368,6 +372,7 @@ def coarse(images, factor=4):
 
 
 def mean_and_std(values):
+    """Mean and sample standard deviation of per-seed results."""
     tensor = torch.tensor(values, dtype=torch.float64)
     return {"mean": tensor.mean().item(),
             "std": tensor.std().item() if len(values) > 1 else 0.0,
@@ -424,7 +429,8 @@ def run_sample_audit(args, device, weights, out_dir):
         "pairwise_ssim_coarse_real": mean_pairwise_ssim(coarse(real), device),
         "repeats": {
             "count_above_real_max": mean_and_std([r["count_above_real_max"] for r in runs]),
-            "generated_vs_train_mean": mean_and_std([r["generated_vs_train"]["mean"] for r in runs]),
+            "generated_vs_train_mean":
+                mean_and_std([r["generated_vs_train"]["mean"] for r in runs]),
             "generated_vs_train_max": mean_and_std([r["generated_vs_train"]["max"] for r in runs]),
             "generated_vs_heldout_mean": mean_and_std(
                 [r["generated_vs_heldout"]["mean"] for r in runs]),
@@ -451,6 +457,7 @@ def run_sample_audit(args, device, weights, out_dir):
 
 
 def main():
+    """Parse command-line arguments and run the requested evaluation."""
     parser = argparse.ArgumentParser(description="Generate and evaluate HipMRI slices.")
     parser.add_argument("--model", choices=[*SAMPLE_MODELS, *AUTOENCODERS], default="dcgan")
     parser.add_argument("--weights", default=None,

@@ -175,9 +175,11 @@ class HipMRISlices(Dataset):
             self.images = torch.stack(loaded)
 
     def __len__(self):
+        """Number of slices in the split."""
         return len(self.paths)
 
     def __getitem__(self, index):
+        """One normalised (1, 128, 256) slice in [0, 1]."""
         if self.images is not None:
             image = self.images[index]
         else:
