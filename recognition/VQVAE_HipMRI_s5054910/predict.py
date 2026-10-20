@@ -16,7 +16,9 @@ Four evaluation modes:
 * Generation quality (--fid, generative models): FID and KID between generated
   slices and the real slices of the chosen reference patients, with the same
   scores for random real training slices as the attainable floor. Samples are
-  cached on disk, so a later run on another reference reuses them.
+  cached on disk, so a later run on another reference reuses them. With
+  --model vqvae / vqvae2, --fid scores the reconstructions of those training
+  slices instead: the best FID the decoder allows, before any prior is involved.
 * Memorisation audit (default for generative models): how close each sample is
   to its most similar training slice compared with real unseen patients
   (near-copies), and diversity as mean pairwise SSIM. SSIM is used here only to
@@ -37,6 +39,7 @@ Usage:
     python3 predict.py --model pixelcnn2 --fid --repeats 3 --temperature 0.95 --reference validate
     python3 predict.py --model pixelcnn2 --repeats 3 --temperature 0.95 --reference validate
     python3 predict.py --model dcgan --fid --repeats 3 --reference test
+    python3 predict.py --model vqvae2 --fid --repeats 3 --reference validate
     python3 predict.py --model vqvae2 --interpolate
 """
 
@@ -597,6 +600,38 @@ def cached_samples(args, device, weights, run_dir):
     return (samples * 255).round() / 255.0, seconds
 
 
+def train_floor_subset(train_images, count, seed):
+    """Random real training slices (fixed seed): the floor that FID is compared with."""
+    generator = torch.Generator().manual_seed(seed)
+    picks = torch.randperm(len(train_images), generator=generator)[:count]
+    return train_images[picks]
+
+
+def score_against_reference(named_sets, reference, device):
+    """FID and KID of each named image set against the reference slices."""
+    # 8-bit quantisation for every set, so all of them are treated identically.
+    sets = {name: (images * 255).round() / 255.0 for name, images in named_sets.items()}
+    reference_features = inception_features((reference * 255).round() / 255.0, device)
+    scores = {}
+    for name, images in sets.items():
+        features = inception_features(images, device)
+        kid_mean, kid_std = kernel_inception_distance(features, reference_features)
+        scores[name] = {"fid": frechet_distance(features, reference_features),
+                        "kid": kid_mean, "kid_std": kid_std}
+    return scores
+
+
+def print_scores(results, labels, out_dir):
+    """FID and KID lines in the format used for the README tables (KID x 1000)."""
+    print(f"\nReference ({results['reference']}): {results['reference_patients']} patients, "
+          f"{results['num_reference']} slices; {results['num_scored']} scored slices per set")
+    for name, label in labels:
+        r = results[name]
+        print(f"  {label:24s} FID {r['fid']:7.2f}   "
+              f"KID x1000 {1000 * r['kid']:6.2f} +/- {1000 * r['kid_std']:.2f}")
+    print("Outputs saved to", out_dir)
+
+
 def run_fid(args, device, weights, run_dir, out_dir):
     """FID and KID of generated samples against the --reference patients, with a real floor."""
     samples, seconds = cached_samples(args, device, weights, run_dir)
@@ -606,36 +641,45 @@ def run_fid(args, device, weights, run_dir, out_dir):
 
     # Floor: random real training slices, as many as the samples. Even real data from
     # other patients does not reach FID 0, so this is the best a generator can expect.
-    generator = torch.Generator().manual_seed(args.seed)
-    picks = torch.randperm(len(train_images), generator=generator)[:len(samples)]
-    train_subset = train_images[picks]
-
-    # 8-bit quantisation for every set, so all three are treated identically.
-    sets = {name: (images * 255).round() / 255.0 for name, images in
-            (("generated", samples), ("train", train_subset), ("reference", reference))}
-    features = {name: inception_features(images, device) for name, images in sets.items()}
+    train_subset = train_floor_subset(train_images, len(samples), args.seed)
+    scores = score_against_reference({"generated": samples, "train": train_subset},
+                                     reference, device)
 
     results = {"model": args.model, "run": args.run_name or args.model,
                "temperature": args.temperature, "reference": args.reference,
                "reference_patients": count_patients(reference_sets),
-               "num_generated": len(samples), "num_reference": len(reference),
-               "seeds": [args.seed + r for r in range(args.repeats)]}
+               "num_scored": len(samples), "num_reference": len(reference),
+               "seeds": [args.seed + r for r in range(args.repeats)], **scores}
     if seconds is not None:
         results["ms_per_image"] = seconds * 1000
-    for name in ("generated", "train"):
-        kid_mean, kid_std = kernel_inception_distance(features[name], features["reference"])
-        results[name] = {"fid": frechet_distance(features[name], features["reference"]),
-                         "kid": kid_mean, "kid_std": kid_std}
     save_json(results, os.path.join(out_dir, "fid.json"))
+    print_scores(results, (("generated", "Generated"), ("train", "Real train (floor)")),
+                 out_dir)
 
-    # KID is conventionally reported x 1000.
-    print(f"\nReference ({args.reference}): {results['reference_patients']} patients, "
-          f"{len(reference)} slices; {len(samples)} generated slices")
-    for name, label in (("generated", "Generated"), ("train", "Real train (floor)")):
-        r = results[name]
-        print(f"  {label:20s} FID {r['fid']:7.2f}   "
-              f"KID x1000 {1000 * r['kid']:6.2f} +/- {1000 * r['kid_std']:.2f}")
-    print("Outputs saved to", out_dir)
+
+def run_reconstruction_fid(args, device, weights, out_dir):
+    """FID and KID of the autoencoder's reconstructions: the best its decoder allows.
+
+    The same random training slices as the floor in run_fid are scored twice, as
+    they are and after encoding and decoding. The gap between the two is the cost
+    of the autoencoder alone; whatever remains between the reconstructions and the
+    prior's samples is the cost of the prior.
+    """
+    model, _ = load_autoencoder(weights, device)
+    check_no_patient_leakage(args.root)
+    reference, reference_sets = load_reference(args)
+    train_images, _ = load_split(args, "train")
+    train_subset = train_floor_subset(train_images, args.repeats * args.num_samples, args.seed)
+    recons, _ = reconstruct_all(model, train_subset, device)
+    scores = score_against_reference({"reconstructed": recons, "train": train_subset},
+                                     reference, device)
+
+    results = {"model": args.model, "reference": args.reference,
+               "reference_patients": count_patients(reference_sets),
+               "num_scored": len(train_subset), "num_reference": len(reference), **scores}
+    save_json(results, os.path.join(out_dir, "reconstruction_fid.json"))
+    print_scores(results, (("reconstructed", "Reconstructed train"),
+                           ("train", "Real train (floor)")), out_dir)
 
 
 # ----------------------------------------------------------------------------
@@ -663,7 +707,8 @@ def parse_args():
     parser.add_argument("--interpolate", action="store_true",
                         help="Save a latent interpolation figure instead of the usual evaluation.")
     parser.add_argument("--fid", action="store_true",
-                        help="Generative models: compute FID and KID instead of the audit.")
+                        help="FID and KID instead of the audit (for vqvae / vqvae2: of the "
+                             "reconstructions, the best the decoder allows).")
     parser.add_argument("--sample-batch", type=int, default=256,
                         help="PixelCNN: grids sampled in parallel.")
     parser.add_argument("--temperature", type=float, default=1.0,
@@ -682,7 +727,7 @@ def output_dir(args, run_dir):
     if args.out_dir:
         return args.out_dir
     name = "eval" if args.temperature == 1.0 else f"eval_t{args.temperature:g}"
-    if args.model in SAMPLE_MODELS and args.reference != "heldout":
+    if (args.model in SAMPLE_MODELS or args.fid) and args.reference != "heldout":
         name += f"_{args.reference}"  # keep earlier pooled-reference results intact
     return os.path.join(run_dir, name)
 
@@ -706,6 +751,8 @@ def main():
             raise ValueError("Interpolation uses the autoencoder's latent space: "
                              "run with --model vqvae or vqvae2.")
         run_interpolation(args, device, weights, run_dir)
+    elif args.model in AUTOENCODERS and args.fid:
+        run_reconstruction_fid(args, device, weights, out_dir)
     elif args.model in AUTOENCODERS:
         evaluate_vqvae(args, device, weights, out_dir)
     elif args.fid:
