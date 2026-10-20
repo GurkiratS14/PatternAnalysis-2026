@@ -19,4 +19,7 @@
 
 source $HOME/miniconda3/bin/activate torch
 
+# FID's Inception weights live in the home folder, which every compute node can read.
+export TORCH_HOME=$HOME/.cache/torch
+
 python3 predict.py "$@"
