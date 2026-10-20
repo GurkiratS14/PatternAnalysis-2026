@@ -1,3 +1,11 @@
+# --------------------------------------------------------------------
+# File:    predict.py
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Date:    October 2026
+# Purpose: Evaluation driver: reconstruction SSIM, sampling with the
+#          memorisation audit, and latent interpolation.
+# --------------------------------------------------------------------
 """
 predict.py - Generate slices from a trained model and evaluate them.
 
@@ -9,8 +17,10 @@ and runs the sample audit, optionally repeated over several seeds:
   * the same for real held-out slices, as the reference for an unseen patient;
   * near-copies: samples closer to a training slice than any held-out slice;
   * diversity: mean pairwise SSIM at full and at 4x-reduced resolution.
-Held-out slices are the test and validation patients (7 patients), none of
-which the generative models were trained on.
+--reference picks the real held-out patients the audit compares against:
+validate (4 patients) for choosing models and temperatures, test (3 patients)
+for reporting final numbers, or heldout (both, 7 patients). Keeping these
+separate means test patients never influence a modelling decision.
 
 For an autoencoder (vqvae, vqvae2): reconstructs every test slice, scores
 each against its own original with paired SSIM, and saves the best and worst.
@@ -21,7 +31,7 @@ Usage:
     python3 predict.py --model dcgan --repeats 3
     python3 predict.py --model vqvae
     python3 predict.py --model pixelcnn --run-name pixelcnn_reg --temperature 0.9 --repeats 3
-    python3 predict.py --model pixelcnn2 --repeats 3
+    python3 predict.py --model pixelcnn2 --repeats 3 --reference validate --temperature 0.95
     python3 predict.py --model vqvae2 --interpolate
 """
 
@@ -44,6 +54,9 @@ from modules import VQVAE, VQVAE2, Generator, PixelCNN
 SSIM_TARGET = 0.6
 SAMPLE_MODELS = ("dcgan", "wgan_gp", "pixelcnn", "pixelcnn2")
 AUTOENCODERS = ("vqvae", "vqvae2")
+# Real held-out splits used as the audit reference for each --reference choice.
+REFERENCE_SPLITS = {"validate": ("validate",), "test": ("test",),
+                    "heldout": ("test", "validate")}
 
 
 def load_generator(weights_path, device):
@@ -386,8 +399,9 @@ def run_sample_audit(args, device, weights, out_dir):
 
     check_no_patient_leakage(args.root)
     train_set = HipMRISlices(args.root, "train", max_slices=args.max_slices)
+    # Selection uses validation patients only; reporting uses test patients only.
     heldout_sets = [HipMRISlices(args.root, split, max_slices=args.max_slices)
-                    for split in ("test", "validate")]
+                    for split in REFERENCE_SPLITS[args.reference]]
     heldout = torch.cat([torch.stack([s[i] for i in range(len(s))]) for s in heldout_sets])
     # Evenly spaced held-out slices: the reference for an unseen real patient.
     picks = torch.linspace(0, len(heldout) - 1, min(args.num_samples, len(heldout))).long()
@@ -421,6 +435,7 @@ def run_sample_audit(args, device, weights, out_dir):
         "run": args.run_name or args.model,
         "temperature": args.temperature,
         "num_samples": args.num_samples,
+        "reference": args.reference,
         "seeds": [args.seed + r for r in range(args.repeats)],
         "ms_per_image": seconds_per_image * 1000,
         "heldout_patients": len({s.patient_of(i) for s in heldout_sets for i in range(len(s))}),
@@ -445,7 +460,8 @@ def run_sample_audit(args, device, weights, out_dir):
     r, s = results["repeats"], results["real_heldout_vs_train"]
     print(f"\nGenerated {args.num_samples} samples per seed, "
           f"{seconds_per_image * 1000:.2f} ms per image")
-    print(f"Reference: {results['heldout_patients']} held-out patients, best-match SSIM vs train "
+    print(f"Reference ({args.reference}): {results['heldout_patients']} held-out patients, "
+          f"best-match SSIM vs train "
           f"mean {s['mean']:.3f}, max {s['max']:.3f}")
     print(f"Over {args.repeats} seed(s), mean +/- std:")
     for key in ("generated_vs_heldout_mean", "generated_vs_train_mean", "generated_vs_train_max",
@@ -481,6 +497,9 @@ def main():
                         help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
     parser.add_argument("--run-name", default=None,
                         help="Run folder under ~/hipmri_runs, default the model name.")
+    parser.add_argument("--reference", choices=sorted(REFERENCE_SPLITS), default="test",
+                        help="Audit reference: validate to choose, test to report, "
+                             "heldout for both pooled.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -488,6 +507,8 @@ def main():
     filename = "pixelcnn.pt" if args.model.startswith("pixelcnn") else f"{args.model}.pt"
     weights = args.weights or os.path.join(run_dir, filename)
     eval_name = "eval" if args.temperature == 1.0 else f"eval_t{args.temperature:g}"
+    if args.model in SAMPLE_MODELS and args.reference != "heldout":
+        eval_name += f"_{args.reference}"  # keep earlier pooled-reference results intact
     out_dir = args.out_dir or os.path.join(run_dir, eval_name)
     os.makedirs(out_dir, exist_ok=True)
 
