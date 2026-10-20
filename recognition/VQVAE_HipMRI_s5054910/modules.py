@@ -1,3 +1,11 @@
+# --------------------------------------------------------------------
+# File:    modules.py
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Date:    October 2026
+# Purpose: Model definitions: DCGAN generator and discriminator, WGAN-GP
+#          critic, VQ-VAE, VQ-VAE-2 and the gated PixelCNN prior.
+# --------------------------------------------------------------------
 """
 modules.py - Model components for HipMRI image generation.
 

@@ -1,3 +1,11 @@
+# --------------------------------------------------------------------
+# File:    dataset.py
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Date:    October 2026
+# Purpose: Loads HipMRI 2D slices: transpose, centre-crop, per-slice
+#          normalisation, patient-level splits and a leakage check.
+# --------------------------------------------------------------------
 """
 dataset.py - Data loading for the HipMRI 2D prostate MRI slices.
 

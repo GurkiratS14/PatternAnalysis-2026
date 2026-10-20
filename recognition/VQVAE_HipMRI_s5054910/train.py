@@ -1,7 +1,16 @@
+# --------------------------------------------------------------------
+# File:    train.py
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Date:    October 2026
+# Purpose: Training driver for DCGAN, WGAN-GP, VQ-VAE, VQ-VAE-2 and the
+#          PixelCNN priors on HipMRI 2D slices.
+# --------------------------------------------------------------------
 """
 train.py - Training script for HipMRI image generation models.
 
-Trains the DCGAN baseline, the WGAN-GP or the VQ-VAE. Saves sample or
+Trains the DCGAN and WGAN-GP baselines, the VQ-VAE and VQ-VAE-2, and the
+PixelCNN priors over their codes. Saves sample or
 reconstruction grids, training curves and model weights to --out-dir, which
 should sit outside the repository.
 
@@ -12,6 +21,8 @@ Usage:
     python3 train.py --model pixelcnn --epochs 60   (needs the trained VQ-VAE)
     python3 train.py --model vqvae2 --epochs 100
     python3 train.py --model pixelcnn --level top --run-name pixelcnn2_top \
+        --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
+    python3 train.py --model pixelcnn --level bottom --run-name pixelcnn2 \
         --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
 Quick check on a few slices:
     python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16

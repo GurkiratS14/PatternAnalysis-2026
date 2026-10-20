@@ -1,4 +1,11 @@
 #!/bin/bash
+# --------------------------------------------------------------------
+# File:    slurm_train.sh
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Date:    October 2026
+# Purpose: Slurm job script that runs train.py on one Rangpur A100.
+# --------------------------------------------------------------------
 #SBATCH --account=comp3710
 #SBATCH --job-name=hipmri-train
 #SBATCH --partition=comp3710
