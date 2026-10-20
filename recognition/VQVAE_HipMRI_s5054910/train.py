@@ -48,9 +48,11 @@ from metrics import ssim_pairs
 from modules import (LATENT_DIM, VQVAE, VQVAE2, Critic, Discriminator, Generator, PixelCNN,
                      count_parameters)
 
+# Default learning rates: the DCGAN paper's 2e-4, the WGAN-GP paper's 1e-4.
 DEFAULT_LR = {"dcgan": 2e-4, "wgan_gp": 1e-4, "vqvae": 2e-4, "vqvae2": 2e-4,
               "pixelcnn": 3e-4}
 
+# Training-curve layouts: one dict per panel, listing the history keys to plot.
 PIXELCNN_PANELS = [
     {"title": "Prior negative log-likelihood", "ylabel": "Bits per code",
      "series": [("train_bits", "Training"), ("val_bits", "Validation")]},
@@ -86,6 +88,10 @@ WGAN_PANELS = [
 ]
 
 
+# ----------------------------------------------------------------------------
+# Shared helpers
+# ----------------------------------------------------------------------------
+
 def to_tanh_range(images):
     """[0, 1] -> [-1, 1], to match the generator's tanh output."""
     return images * 2.0 - 1.0
@@ -100,9 +106,21 @@ def make_train_loader(args):
     """Training DataLoader, after the patient leakage check in get_dataloaders."""
     train_loader, _, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
                                          max_slices=args.max_slices)
+    # drop_last=True means a batch size larger than the split gives no batches at all.
     if len(train_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
     return train_loader
+
+
+def accumulate(totals, stats):
+    """Add one step's statistics to the running totals (keeps first-seen key order)."""
+    for key, value in stats.items():
+        totals[key] = totals.get(key, 0.0) + value
+
+
+def average(totals, count):
+    """Divide every running total by the number of steps."""
+    return {key: value / count for key, value in totals.items()}
 
 
 def save_history(history, out_dir, panels):
@@ -119,6 +137,7 @@ def save_history(history, out_dir, panels):
         for i, (key, label) in enumerate(panel["series"]):
             ax.plot(epochs, [row[key] for row in history], color=colours[i],
                     linestyle=styles[i], linewidth=2, label=label)
+        # Optional reference line, e.g. the 0.6 SSIM target.
         if "hline" in panel:
             ax.axhline(panel["hline"], color="gray", linewidth=1, linestyle=":")
         if "ylim" in panel:
@@ -134,6 +153,7 @@ def save_history(history, out_dir, panels):
 
 def save_progress(generator, fixed_noise, epoch, out_dir, checkpoint):
     """Save a sample grid from the fixed noise, and the model weights."""
+    # eval() so batch norm uses its running statistics, as it will at inference time.
     generator.eval()
     with torch.no_grad():
         samples = to_unit_range(generator(fixed_noise))
@@ -149,6 +169,44 @@ def print_epoch(epoch, total, row, seconds):
     print(f"Epoch {epoch:3d}/{total}  {stats}  {seconds:.0f}s", flush=True)
 
 
+def is_save_epoch(epoch, args):
+    """True every --sample-every epochs and on the final epoch."""
+    return epoch % args.sample_every == 0 or epoch == args.epochs
+
+
+# ----------------------------------------------------------------------------
+# DCGAN baseline
+# ----------------------------------------------------------------------------
+
+def dcgan_step(generator, discriminator, real, criterion, opt_g, opt_d, latent_dim):
+    """One discriminator update followed by one generator update on a batch in [-1, 1]."""
+    batch = real.size(0)
+    real_labels = torch.ones(batch, device=real.device)
+    fake_labels = torch.zeros(batch, device=real.device)
+    fake = generator(torch.randn(batch, latent_dim, device=real.device))
+
+    # Discriminator: push real towards 1 and fake towards 0.
+    # detach() stops this loss from updating the generator.
+    real_logits = discriminator(real)
+    fake_logits = discriminator(fake.detach())
+    d_loss = criterion(real_logits, real_labels) + criterion(fake_logits, fake_labels)
+    opt_d.zero_grad(set_to_none=True)
+    d_loss.backward()
+    opt_d.step()
+
+    # Generator: make the just-updated discriminator call the same fakes real
+    # (the non-saturating loss, which gives stronger gradients early in training).
+    g_loss = criterion(discriminator(fake), real_labels)
+    opt_g.zero_grad(set_to_none=True)
+    g_loss.backward()
+    opt_g.step()
+
+    # D(x) and D(G(z)) as probabilities show which network is winning.
+    return {"d_loss": d_loss.item(), "g_loss": g_loss.item(),
+            "d_real": torch.sigmoid(real_logits).mean().item(),
+            "d_fake": torch.sigmoid(fake_logits).mean().item()}
+
+
 def train_dcgan(args, device, out_dir):
     """Train the DCGAN baseline with the standard alternating GAN updates."""
     train_loader = make_train_loader(args)
@@ -157,7 +215,9 @@ def train_dcgan(args, device, out_dir):
     print(f"Generator parameters: {count_parameters(generator):,}")
     print(f"Discriminator parameters: {count_parameters(discriminator):,}")
 
+    # BCE on logits is numerically safer than a sigmoid followed by BCE.
     criterion = nn.BCEWithLogitsLoss()
+    # beta1 = 0.5, as in the DCGAN paper: less momentum keeps the two players stable.
     opt_g = torch.optim.Adam(generator.parameters(), lr=args.lr, betas=(0.5, 0.999))
     opt_d = torch.optim.Adam(discriminator.parameters(), lr=args.lr, betas=(0.5, 0.999))
 
@@ -168,43 +228,18 @@ def train_dcgan(args, device, out_dir):
     for epoch in range(1, args.epochs + 1):
         generator.train()
         start = time.time()
-        totals = {"d_loss": 0.0, "g_loss": 0.0, "d_real": 0.0, "d_fake": 0.0}
-
+        totals = {}
         for real in train_loader:
-            real = to_tanh_range(real.to(device))
-            batch = real.size(0)
-            real_labels = torch.ones(batch, device=device)
-            fake_labels = torch.zeros(batch, device=device)
+            # The generator ends in tanh, so real images are moved to [-1, 1] too.
+            stats = dcgan_step(generator, discriminator, to_tanh_range(real.to(device)),
+                               criterion, opt_g, opt_d, args.latent_dim)
+            accumulate(totals, stats)
 
-            fake = generator(torch.randn(batch, args.latent_dim, device=device))
-
-            # Discriminator step: push real towards 1 and fake towards 0.
-            # detach() stops this loss from updating the generator.
-            real_logits = discriminator(real)
-            fake_logits = discriminator(fake.detach())
-            d_loss = (criterion(real_logits, real_labels)
-                      + criterion(fake_logits, fake_labels))
-            opt_d.zero_grad(set_to_none=True)
-            d_loss.backward()
-            opt_d.step()
-
-            # Generator step: make the updated discriminator call fakes real.
-            g_loss = criterion(discriminator(fake), real_labels)
-            opt_g.zero_grad(set_to_none=True)
-            g_loss.backward()
-            opt_g.step()
-
-            totals["d_loss"] += d_loss.item()
-            totals["g_loss"] += g_loss.item()
-            totals["d_real"] += torch.sigmoid(real_logits).mean().item()
-            totals["d_fake"] += torch.sigmoid(fake_logits).mean().item()
-
-        row: dict[str, float] = {"epoch": epoch}
-        row.update({key: value / len(train_loader) for key, value in totals.items()})
+        row: dict[str, float] = {"epoch": epoch, **average(totals, len(train_loader))}
         history.append(row)
         print_epoch(epoch, args.epochs, row, time.time() - start)
 
-        if epoch % args.sample_every == 0 or epoch == args.epochs:
+        if is_save_epoch(epoch, args):
             save_progress(generator, fixed_noise, epoch, out_dir,
                           {"generator": generator.state_dict(),
                            "discriminator": discriminator.state_dict(),
@@ -212,12 +247,46 @@ def train_dcgan(args, device, out_dir):
             save_history(history, out_dir, DCGAN_PANELS)
 
 
+# ----------------------------------------------------------------------------
+# WGAN-GP baseline
+# ----------------------------------------------------------------------------
+
 def gradient_penalty(critic, real, fake):
     """Mean of (||grad critic(x_hat)|| - 1)^2 at random points between real and fake."""
+    # One random mixing weight per image; x_hat lies on the line between a real and a fake.
     eps = torch.rand(real.size(0), 1, 1, 1, device=real.device)
     mixed = (eps * real + (1 - eps) * fake).requires_grad_(True)
+    # create_graph=True so the penalty itself can be backpropagated into the critic.
     grads, = torch.autograd.grad(critic(mixed).sum(), mixed, create_graph=True)
     return ((grads.flatten(1).norm(2, dim=1) - 1) ** 2).mean()
+
+
+def critic_step(generator, critic, real, opt_c, args):
+    """One critic update: score real high and fake low, with gradient norms kept near 1."""
+    # The generator is not being trained here, so no graph is built through it.
+    with torch.no_grad():
+        fake = generator(torch.randn(real.size(0), args.latent_dim, device=real.device))
+    real_score = critic(real).mean()
+    fake_score = critic(fake).mean()
+    penalty = gradient_penalty(critic, real, fake)
+    critic_loss = fake_score - real_score + args.gp_weight * penalty
+    opt_c.zero_grad(set_to_none=True)
+    critic_loss.backward()
+    opt_c.step()
+    # real - fake is the critic's estimate of the Wasserstein distance.
+    return {"critic_loss": critic_loss.item(),
+            "wasserstein": (real_score - fake_score).item(),
+            "gp": penalty.item()}
+
+
+def generator_step(generator, critic, batch, opt_g, args, device):
+    """One generator update: raise the critic's score of freshly generated images."""
+    fake = generator(torch.randn(batch, args.latent_dim, device=device))
+    g_loss = -critic(fake).mean()
+    opt_g.zero_grad(set_to_none=True)
+    g_loss.backward()
+    opt_g.step()
+    return g_loss.item()
 
 
 def train_wgan_gp(args, device, out_dir):
@@ -228,6 +297,7 @@ def train_wgan_gp(args, device, out_dir):
     print(f"Generator parameters: {count_parameters(generator):,}")
     print(f"Critic parameters: {count_parameters(critic):,}")
 
+    # Adam(0, 0.9) as recommended by Gulrajani et al. (2017) for WGAN-GP.
     opt_g = torch.optim.Adam(generator.parameters(), lr=args.lr, betas=(0.0, 0.9))
     opt_c = torch.optim.Adam(critic.parameters(), lr=args.lr, betas=(0.0, 0.9))
 
@@ -238,53 +308,34 @@ def train_wgan_gp(args, device, out_dir):
     for epoch in range(1, args.epochs + 1):
         generator.train()
         start = time.time()
-        totals = {"critic_loss": 0.0, "wasserstein": 0.0, "gp": 0.0, "g_loss": 0.0}
-        generator_steps = 0
+        totals, g_total, generator_steps = {}, 0.0, 0
 
         for real in train_loader:
             real = to_tanh_range(real.to(device))
-            batch = real.size(0)
-
-            # Critic step: score real high and fake low, with gradients kept near 1.
-            with torch.no_grad():
-                fake = generator(torch.randn(batch, args.latent_dim, device=device))
-            real_score = critic(real).mean()
-            fake_score = critic(fake).mean()
-            penalty = gradient_penalty(critic, real, fake)
-            critic_loss = fake_score - real_score + args.gp_weight * penalty
-            opt_c.zero_grad(set_to_none=True)
-            critic_loss.backward()
-            opt_c.step()
+            accumulate(totals, critic_step(generator, critic, real, opt_c, args))
             critic_steps += 1
-
-            totals["critic_loss"] += critic_loss.item()
-            totals["wasserstein"] += (real_score - fake_score).item()
-            totals["gp"] += penalty.item()
-
-            # Generator step every n_critic critic steps: raise the critic's score of fakes.
+            # The critic trains n_critic times as often, so its estimate stays accurate.
             if critic_steps % args.n_critic == 0:
-                fake = generator(torch.randn(batch, args.latent_dim, device=device))
-                g_loss = -critic(fake).mean()
-                opt_g.zero_grad(set_to_none=True)
-                g_loss.backward()
-                opt_g.step()
-                totals["g_loss"] += g_loss.item()
+                g_total += generator_step(generator, critic, real.size(0), opt_g, args, device)
                 generator_steps += 1
 
-        row: dict[str, float] = {"epoch": epoch}
-        for key in ("critic_loss", "wasserstein", "gp"):
-            row[key] = totals[key] / len(train_loader)
-        row["g_loss"] = totals["g_loss"] / generator_steps if generator_steps else float("nan")
+        row: dict[str, float] = {"epoch": epoch, **average(totals, len(train_loader))}
+        # The generator loss is averaged over generator steps only, not over all batches.
+        row["g_loss"] = g_total / generator_steps if generator_steps else float("nan")
         history.append(row)
         print_epoch(epoch, args.epochs, row, time.time() - start)
 
-        if epoch % args.sample_every == 0 or epoch == args.epochs:
+        if is_save_epoch(epoch, args):
             save_progress(generator, fixed_noise, epoch, out_dir,
                           {"generator": generator.state_dict(),
                            "critic": critic.state_dict(),
                            "epoch": epoch, "latent_dim": args.latent_dim})
             save_history(history, out_dir, WGAN_PANELS)
 
+
+# ----------------------------------------------------------------------------
+# VQ-VAE and VQ-VAE-2
+# ----------------------------------------------------------------------------
 
 @torch.no_grad()
 def evaluate_reconstruction(model, loader, device):
@@ -293,6 +344,7 @@ def evaluate_reconstruction(model, loader, device):
     total_mse, total_ssim, count = 0.0, 0.0, 0
     for real in loader:
         real = real.to(device)
+        # Clamp to the valid intensity range before scoring, as the saved images are.
         recon = model(real)[0].clamp(0, 1)
         total_mse += F.mse_loss(recon, real, reduction="sum").item() / real[0].numel()
         total_ssim += ssim_pairs(recon, real).sum().item()
@@ -304,6 +356,47 @@ def evaluate_reconstruction(model, loader, device):
 def build_autoencoder(kind, config):
     """Rebuild a VQ-VAE or VQ-VAE-2 from its saved configuration."""
     return (VQVAE2 if kind == "vqvae2" else VQVAE)(**config)
+
+
+def vqvae_epoch(model, loader, optimiser, device):
+    """One pass over the training slices. Returns mean losses and the last batch seen."""
+    totals, last_batch = {}, torch.empty(0)
+    for real in loader:
+        real = real.to(device)
+        last_batch = real
+        recon, vq_loss, _ = model(real)
+        # vq_loss already holds the codebook term and beta x the commitment term.
+        recon_loss = F.mse_loss(recon, real)
+        loss = recon_loss + vq_loss
+        optimiser.zero_grad(set_to_none=True)
+        loss.backward()
+        optimiser.step()
+        accumulate(totals, {"recon_loss": recon_loss.item(), "vq_loss": vq_loss.item()})
+    return average(totals, len(loader)), last_batch
+
+
+def maintain_codebooks(model, batch):
+    """Log codebook usage and restart dead codes, for each quantiser (one, or top and bottom)."""
+    stats = {}
+    latents = model.pre_quant_latents(batch)
+    for (name, quantizer), z in zip(model.quantizers(), latents):
+        prefix = f"{name}_" if name == "top" else ""
+        used, perplexity = quantizer.usage_stats()
+        # Unused codes are moved onto recent encoder outputs so they start being chosen.
+        flat = z.permute(0, 2, 3, 1).reshape(-1, z.size(1))
+        stats.update({f"{prefix}codes_used": used, f"{prefix}perplexity": perplexity,
+                      f"{prefix}restarted": quantizer.reset_dead_codes(flat)})
+    return stats
+
+
+def save_reconstructions(model, fixed, epoch, out_dir):
+    """Save the fixed validation slices (top row) above their reconstructions."""
+    model.eval()
+    with torch.no_grad():
+        recon = model(fixed)[0].clamp(0, 1)
+    model.train()
+    save_image(torch.cat([fixed, recon]),
+               os.path.join(out_dir, f"recon_epoch_{epoch:03d}.png"), nrow=8)
 
 
 def train_vqvae(args, device, out_dir):
@@ -319,6 +412,7 @@ def train_vqvae(args, device, out_dir):
     print(f"{args.model} parameters: {count_parameters(model):,}")
     optimiser = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    # Eight evenly spaced validation slices, reconstructed at every save to show progress.
     val_set = val_loader.dataset
     assert isinstance(val_set, HipMRISlices)
     picks = torch.linspace(0, len(val_set) - 1, 8).long().tolist()
@@ -328,61 +422,38 @@ def train_vqvae(args, device, out_dir):
     for epoch in range(1, args.epochs + 1):
         model.train()
         start = time.time()
-        totals = {"recon_loss": 0.0, "vq_loss": 0.0}
-        last_batch = torch.empty(0)
-
-        for real in train_loader:
-            real = real.to(device)
-            last_batch = real
-            recon, vq_loss, _ = model(real)
-            recon_loss = F.mse_loss(recon, real)
-            loss = recon_loss + vq_loss
-            optimiser.zero_grad(set_to_none=True)
-            loss.backward()
-            optimiser.step()
-            totals["recon_loss"] += recon_loss.item()
-            totals["vq_loss"] += vq_loss.item()
-
-        # Codebook statistics and dead-code restarts, per quantiser (one, or top and bottom).
-        stats = {}
-        latents = model.pre_quant_latents(last_batch)
-        for (name, quantizer), z in zip(model.quantizers(), latents):
-            prefix = f"{name}_" if name == "top" else ""
-            used, perplexity = quantizer.usage_stats()
-            flat = z.permute(0, 2, 3, 1).reshape(-1, z.size(1))
-            stats.update({f"{prefix}codes_used": used, f"{prefix}perplexity": perplexity,
-                          f"{prefix}restarted": quantizer.reset_dead_codes(flat)})
+        losses, last_batch = vqvae_epoch(model, train_loader, optimiser, device)
+        stats = maintain_codebooks(model, last_batch)
         val_mse, val_ssim = evaluate_reconstruction(model, val_loader, device)
 
-        row: dict[str, float] = {"epoch": epoch}
-        row.update({key: value / len(train_loader) for key, value in totals.items()})
-        row.update({"val_mse": val_mse, "val_ssim": val_ssim})
-        row.update(stats)
+        row: dict[str, float] = {"epoch": epoch, **losses,
+                                 "val_mse": val_mse, "val_ssim": val_ssim, **stats}
         history.append(row)
         print_epoch(epoch, args.epochs, row, time.time() - start)
 
+        # Keep the checkpoint with the best validation SSIM, never simply the last one.
         if val_ssim > best_ssim:
             best_ssim = val_ssim
             torch.save({"model": model.state_dict(), "config": model.config, "kind": args.model,
                         "epoch": epoch, "val_ssim": val_ssim},
                        os.path.join(out_dir, f"{args.model}.pt"))
 
-        if epoch % args.sample_every == 0 or epoch == args.epochs:
-            model.eval()
-            with torch.no_grad():
-                recon = model(fixed)[0].clamp(0, 1)
-            model.train()
-            save_image(torch.cat([fixed, recon]),
-                       os.path.join(out_dir, f"recon_epoch_{epoch:03d}.png"), nrow=8)
+        if is_save_epoch(epoch, args):
+            save_reconstructions(model, fixed, epoch, out_dir)
             save_history(history, out_dir,
                          VQVAE2_PANELS if args.model == "vqvae2" else VQVAE_PANELS)
 
     print(f"Best validation SSIM: {best_ssim:.3f}")
 
 
+# ----------------------------------------------------------------------------
+# PixelCNN priors over the code grids
+# ----------------------------------------------------------------------------
+
 def load_vqvae(weights, device):
     """Load a trained VQ-VAE or VQ-VAE-2 in evaluation mode, and return it with its kind."""
     checkpoint = torch.load(weights, map_location=device)
+    # Checkpoints saved before VQ-VAE-2 existed have no "kind" and are single-level.
     kind = checkpoint.get("kind", "vqvae")
     vqvae = build_autoencoder(kind, checkpoint["config"]).to(device)
     vqvae.load_state_dict(checkpoint["model"])
@@ -397,10 +468,25 @@ def encode_dataset(vqvae, dataset, device, batch_size=256):
     return [torch.cat([batch[i].cpu() for batch in levels]) for i in range(len(levels[0]))]
 
 
+def load_code_grids(args, vqvae, level, device):
+    """Code grids to model (train, val) and, for the bottom level, the top grids it is
+    conditioned on (train, val; None otherwise)."""
+    train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
+                                                  max_slices=args.max_slices)
+    # The autoencoder is frozen, so every slice is encoded once, up front.
+    train_levels = encode_dataset(vqvae, train_loader.dataset, device)
+    val_levels = encode_dataset(vqvae, val_loader.dataset, device)
+    # Levels are ordered [top, bottom] for VQ-VAE-2 and [single] for VQ-VAE.
+    index = 0 if level == "top" else -1
+    train_cond = train_levels[0] if level == "bottom" else None
+    val_cond = val_levels[0] if level == "bottom" else None
+    return train_levels[index], val_levels[index], train_cond, val_cond
+
+
 @torch.no_grad()
 def prior_loss(prior, codes, cond, device, batch_size=64):
     """Mean cross-entropy (nats per code) of a prior on a set of code grids."""
-    prior.eval()
+    prior.eval()  # no dropout when measuring validation loss
     total = 0.0
     for start in range(0, len(codes), batch_size):
         batch = codes[start:start + batch_size].to(device)
@@ -408,6 +494,41 @@ def prior_loss(prior, codes, cond, device, batch_size=64):
         total += F.cross_entropy(prior(batch, context), batch, reduction="sum").item()
     prior.train()
     return total / codes.numel()
+
+
+def prior_epoch(prior, code_loader, optimiser, device):
+    """One pass over the training code grids. Returns the mean loss in nats per code."""
+    total = 0.0
+    for batch in code_loader:
+        codes = batch[0].to(device)
+        cond = batch[1].to(device) if len(batch) > 1 else None
+        # The target at every position is the code itself; the masks ensure the
+        # logits there were computed only from the codes before it.
+        loss = F.cross_entropy(prior(codes, cond), codes)
+        optimiser.zero_grad(set_to_none=True)
+        loss.backward()
+        optimiser.step()
+        total += loss.item()
+    return total / len(code_loader)
+
+
+def save_prior_samples(prior, vqvae, level, val_cond, grid, epoch, out_dir, device):
+    """Decode a few sampled code grids so training progress can be seen."""
+    height, width = grid
+    path = os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png")
+    if level == "single":
+        sampled = prior.sample(8, height, width, device)
+        with torch.no_grad():
+            images = vqvae.decode_levels([sampled]).clamp(0, 1)
+        save_image(images, path, nrow=4)
+    elif level == "bottom" and val_cond is not None:
+        # New bottom detail generated for 8 real validation layouts.
+        top = val_cond[torch.linspace(0, len(val_cond) - 1, 8).long()].to(device)
+        sampled = prior.sample(8, height, width, device, cond_codes=top)
+        with torch.no_grad():
+            images = vqvae.decode_levels([top, sampled]).clamp(0, 1)
+        save_image(images, path, nrow=4)
+    # A top-level grid cannot be decoded on its own, so no images are saved for it.
 
 
 def train_pixelcnn(args, device, out_dir):
@@ -423,18 +544,12 @@ def train_pixelcnn(args, device, out_dir):
         raise ValueError("A VQ-VAE-2 needs --level top or --level bottom.")
     level = args.level if kind == "vqvae2" else "single"
 
-    train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
-                                                  max_slices=args.max_slices)
-    train_levels = encode_dataset(vqvae, train_loader.dataset, device)
-    val_levels = encode_dataset(vqvae, val_loader.dataset, device)
-    index = 0 if level == "top" else -1
-    train_codes, val_codes = train_levels[index], val_levels[index]
-    train_cond = train_levels[0] if level == "bottom" else None
-    val_cond = val_levels[0] if level == "bottom" else None
-    height, width = train_codes.shape[1], train_codes.shape[2]
+    train_codes, val_codes, train_cond, val_cond = load_code_grids(args, vqvae, level, device)
+    grid = (train_codes.shape[1], train_codes.shape[2])
     print(f"Encoded {len(train_codes)} training and {len(val_codes)} validation slices "
-          f"into {height} x {width} code grids ({level} level)")
+          f"into {grid[0]} x {grid[1]} code grids ({level} level)")
 
+    # The conditioning grids travel with their code grids, so shuffling keeps pairs aligned.
     tensors = (train_codes,) if train_cond is None else (train_codes, train_cond)
     code_loader = DataLoader(TensorDataset(*tensors), batch_size=args.batch_size,
                              shuffle=True, drop_last=True)
@@ -455,53 +570,36 @@ def train_pixelcnn(args, device, out_dir):
     for epoch in range(1, args.epochs + 1):
         prior.train()
         start = time.time()
-        total = 0.0
-        for batch in code_loader:
-            codes = batch[0].to(device)
-            cond = batch[1].to(device) if len(batch) > 1 else None
-            loss = F.cross_entropy(prior(codes, cond), codes)
-            optimiser.zero_grad(set_to_none=True)
-            loss.backward()
-            optimiser.step()
-            total += loss.item()
-
+        train_loss = prior_epoch(prior, code_loader, optimiser, device)
         val_loss = prior_loss(prior, val_codes, val_cond, device)
-        row: dict[str, float] = {"epoch": epoch,
-                                 "train_bits": total / len(code_loader) / math.log(2),
+        # Reported in bits per code (nats / ln 2): log2(512) = 9 bits would be pure guessing.
+        row: dict[str, float] = {"epoch": epoch, "train_bits": train_loss / math.log(2),
                                  "val_bits": val_loss / math.log(2)}
         history.append(row)
         print_epoch(epoch, args.epochs, row, time.time() - start)
 
+        # The prior overfits quickly, so only the best-validation epoch is kept.
         if val_loss < best_loss:
             best_loss = val_loss
             torch.save({"model": prior.state_dict(), "config": prior.config,
-                        "grid": (height, width), "level": level,
+                        "grid": grid, "level": level,
                         "vqvae_weights": vqvae_weights, "epoch": epoch,
                         "val_bits": val_loss / math.log(2)},
                        os.path.join(out_dir, "pixelcnn.pt"))
 
-        if epoch % args.sample_every == 0 or epoch == args.epochs:
-            if level == "single":
-                sampled = prior.sample(8, height, width, device)
-                with torch.no_grad():
-                    images = vqvae.decode_levels([sampled]).clamp(0, 1)
-                save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"),
-                           nrow=4)
-            elif level == "bottom" and val_cond is not None:
-                # New bottom detail generated for 8 real validation layouts.
-                top = val_cond[torch.linspace(0, len(val_cond) - 1, 8).long()].to(device)
-                sampled = prior.sample(8, height, width, device, cond_codes=top)
-                with torch.no_grad():
-                    images = vqvae.decode_levels([top, sampled]).clamp(0, 1)
-                save_image(images, os.path.join(out_dir, f"samples_epoch_{epoch:03d}.png"),
-                           nrow=4)
+        if is_save_epoch(epoch, args):
+            save_prior_samples(prior, vqvae, level, val_cond, grid, epoch, out_dir, device)
             save_history(history, out_dir, PIXELCNN_PANELS)
 
     print(f"Best validation: {best_loss / math.log(2):.3f} bits per code")
 
 
-def main():
-    """Parse command-line arguments and train the requested model."""
+# ----------------------------------------------------------------------------
+# Command line
+# ----------------------------------------------------------------------------
+
+def parse_args():
+    """Command-line options for every model, with per-model learning-rate defaults."""
     parser = argparse.ArgumentParser(description="Train a HipMRI generative model.")
     parser.add_argument("--model", choices=["dcgan", "wgan_gp", "vqvae", "vqvae2", "pixelcnn"],
                         default="dcgan")
@@ -510,7 +608,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=None,
-                        help="Defaults to 2e-4 for dcgan and 1e-4 for wgan_gp.")
+                        help="Defaults to 2e-4 (dcgan, vqvae, vqvae2), 1e-4 (wgan_gp), "
+                             "3e-4 (pixelcnn).")
     parser.add_argument("--latent-dim", type=int, default=LATENT_DIM)
     parser.add_argument("--n-critic", type=int, default=5,
                         help="WGAN-GP: critic steps per generator step.")
@@ -544,7 +643,17 @@ def main():
     args = parser.parse_args()
     if args.lr is None:
         args.lr = DEFAULT_LR[args.model]
+    return args
 
+
+TRAINERS = {"dcgan": train_dcgan, "wgan_gp": train_wgan_gp, "vqvae": train_vqvae,
+            "vqvae2": train_vqvae, "pixelcnn": train_pixelcnn}
+
+
+def main():
+    """Parse command-line arguments and train the requested model."""
+    args = parse_args()
+    # Fixed seed so a rerun gives the same initial weights, noise and batch order.
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = os.path.join(args.out_dir, args.run_name or args.model)
@@ -553,15 +662,9 @@ def main():
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
-    if args.model == "dcgan":
-        train_dcgan(args, device, out_dir)
-    elif args.model == "wgan_gp":
-        train_wgan_gp(args, device, out_dir)
-    elif args.model in ("vqvae", "vqvae2"):
-        train_vqvae(args, device, out_dir)
-    else:
-        train_pixelcnn(args, device, out_dir)
+    TRAINERS[args.model](args, device, out_dir)
 
+    # Peak memory is reported for the resource-profiling table in the README.
     if device.type == "cuda":
         print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
     print("Outputs saved to", out_dir)
