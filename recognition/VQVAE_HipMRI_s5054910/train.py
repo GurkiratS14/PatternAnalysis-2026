@@ -24,6 +24,10 @@ Usage:
         --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
     python3 train.py --model pixelcnn --level bottom --run-name pixelcnn2 \
         --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
+With flip augmentation, early stopping and (for priors) gradient clipping:
+    python3 train.py --model vqvae2 --augment --patience 10 --run-name vqvae2_aug
+    python3 train.py --model pixelcnn --level bottom --augment --grad-clip 1.0 --patience 10 \
+        --vqvae-weights ~/hipmri_runs/vqvae2_aug/vqvae2.pt --run-name pixelcnn2_aug
 Quick check on a few slices:
     python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
 """
@@ -104,8 +108,9 @@ def to_unit_range(images):
 
 def make_train_loader(args):
     """Training DataLoader, after the patient leakage check in get_dataloaders."""
+    # --augment flips training slices left-right at random; validation is never flipped.
     train_loader, _, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
-                                         max_slices=args.max_slices)
+                                         augment=args.augment, max_slices=args.max_slices)
     # drop_last=True means a batch size larger than the split gives no batches at all.
     if len(train_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
@@ -172,6 +177,11 @@ def print_epoch(epoch, total, row, seconds):
 def is_save_epoch(epoch, args):
     """True every --sample-every epochs and on the final epoch."""
     return epoch % args.sample_every == 0 or epoch == args.epochs
+
+
+def should_stop(epoch, best_epoch, patience):
+    """Early stopping: True once validation has not improved for `patience` epochs."""
+    return patience > 0 and epoch - best_epoch >= patience
 
 
 # ----------------------------------------------------------------------------
@@ -402,6 +412,7 @@ def save_reconstructions(model, fixed, epoch, out_dir):
 def train_vqvae(args, device, out_dir):
     """Train a VQ-VAE or VQ-VAE-2 on reconstruction, keeping the best validation-SSIM checkpoint."""
     train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
+                                                  augment=args.augment,
                                                   max_slices=args.max_slices)
     if len(train_loader) == 0:
         raise ValueError("No full batch available: lower --batch-size.")
@@ -417,7 +428,7 @@ def train_vqvae(args, device, out_dir):
     assert isinstance(val_set, HipMRISlices)
     picks = torch.linspace(0, len(val_set) - 1, 8).long().tolist()
     fixed = torch.stack([val_set[i] for i in picks]).to(device)
-    history, best_ssim = [], -1.0
+    history, best_ssim, best_epoch = [], -1.0, 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -433,17 +444,21 @@ def train_vqvae(args, device, out_dir):
 
         # Keep the checkpoint with the best validation SSIM, never simply the last one.
         if val_ssim > best_ssim:
-            best_ssim = val_ssim
+            best_ssim, best_epoch = val_ssim, epoch
             torch.save({"model": model.state_dict(), "config": model.config, "kind": args.model,
                         "epoch": epoch, "val_ssim": val_ssim},
                        os.path.join(out_dir, f"{args.model}.pt"))
 
-        if is_save_epoch(epoch, args):
+        stop = should_stop(epoch, best_epoch, args.patience)
+        if is_save_epoch(epoch, args) or stop:
             save_reconstructions(model, fixed, epoch, out_dir)
             save_history(history, out_dir,
                          VQVAE2_PANELS if args.model == "vqvae2" else VQVAE_PANELS)
+        if stop:
+            print(f"Early stopping at epoch {epoch}: no improvement for {args.patience} epochs")
+            break
 
-    print(f"Best validation SSIM: {best_ssim:.3f}")
+    print(f"Best validation SSIM: {best_ssim:.3f} (epoch {best_epoch})")
 
 
 # ----------------------------------------------------------------------------
@@ -474,8 +489,15 @@ def load_code_grids(args, vqvae, level, device):
     train_loader, val_loader, _ = get_dataloaders(args.root, args.batch_size, num_workers=0,
                                                   max_slices=args.max_slices)
     # The autoencoder is frozen, so every slice is encoded once, up front.
-    train_levels = encode_dataset(vqvae, train_loader.dataset, device)
+    train_set = train_loader.dataset
+    train_levels = encode_dataset(vqvae, train_set, device)
     val_levels = encode_dataset(vqvae, val_loader.dataset, device)
+    if args.augment:
+        # Augmentation for the prior: also encode every training slice mirrored
+        # left-right, doubling the code grids it learns from (validation is untouched).
+        assert isinstance(train_set, HipMRISlices) and train_set.images is not None
+        flipped = encode_dataset(vqvae, train_set.images.flip(-1), device)
+        train_levels = [torch.cat([codes, extra]) for codes, extra in zip(train_levels, flipped)]
     # Levels are ordered [top, bottom] for VQ-VAE-2 and [single] for VQ-VAE.
     index = 0 if level == "top" else -1
     train_cond = train_levels[0] if level == "bottom" else None
@@ -496,7 +518,7 @@ def prior_loss(prior, codes, cond, device, batch_size=64):
     return total / codes.numel()
 
 
-def prior_epoch(prior, code_loader, optimiser, device):
+def prior_epoch(prior, code_loader, optimiser, device, grad_clip=0.0):
     """One pass over the training code grids. Returns the mean loss in nats per code."""
     total = 0.0
     for batch in code_loader:
@@ -507,6 +529,9 @@ def prior_epoch(prior, code_loader, optimiser, device):
         loss = F.cross_entropy(prior(codes, cond), codes)
         optimiser.zero_grad(set_to_none=True)
         loss.backward()
+        if grad_clip > 0:
+            # Caps the gradient norm, so one unusual batch cannot destabilise training.
+            torch.nn.utils.clip_grad_norm_(prior.parameters(), grad_clip)
         optimiser.step()
         total += loss.item()
     return total / len(code_loader)
@@ -565,12 +590,12 @@ def train_pixelcnn(args, device, out_dir):
     # AdamW applies weight decay directly to the weights (Loshchilov and Hutter, 2019).
     optimiser = torch.optim.AdamW(prior.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
-    history, best_loss = [], float("inf")
+    history, best_loss, best_epoch = [], float("inf"), 0
 
     for epoch in range(1, args.epochs + 1):
         prior.train()
         start = time.time()
-        train_loss = prior_epoch(prior, code_loader, optimiser, device)
+        train_loss = prior_epoch(prior, code_loader, optimiser, device, args.grad_clip)
         val_loss = prior_loss(prior, val_codes, val_cond, device)
         # Reported in bits per code (nats / ln 2): log2(512) = 9 bits would be pure guessing.
         row: dict[str, float] = {"epoch": epoch, "train_bits": train_loss / math.log(2),
@@ -580,18 +605,22 @@ def train_pixelcnn(args, device, out_dir):
 
         # The prior overfits quickly, so only the best-validation epoch is kept.
         if val_loss < best_loss:
-            best_loss = val_loss
+            best_loss, best_epoch = val_loss, epoch
             torch.save({"model": prior.state_dict(), "config": prior.config,
                         "grid": grid, "level": level,
                         "vqvae_weights": vqvae_weights, "epoch": epoch,
                         "val_bits": val_loss / math.log(2)},
                        os.path.join(out_dir, "pixelcnn.pt"))
 
-        if is_save_epoch(epoch, args):
+        stop = should_stop(epoch, best_epoch, args.patience)
+        if is_save_epoch(epoch, args) or stop:
             save_prior_samples(prior, vqvae, level, val_cond, grid, epoch, out_dir, device)
             save_history(history, out_dir, PIXELCNN_PANELS)
+        if stop:
+            print(f"Early stopping at epoch {epoch}: no improvement for {args.patience} epochs")
+            break
 
-    print(f"Best validation: {best_loss / math.log(2):.3f} bits per code")
+    print(f"Best validation: {best_loss / math.log(2):.3f} bits per code (epoch {best_epoch})")
 
 
 # ----------------------------------------------------------------------------
@@ -639,6 +668,14 @@ def parse_args():
                         help="Save samples, weights and curves every N epochs.")
     parser.add_argument("--max-slices", type=int, default=None,
                         help="Use only the first N slices per split (quick checks).")
+    parser.add_argument("--augment", action="store_true",
+                        help="Random left-right flips of training slices (for priors: train "
+                             "on the codes of original and mirrored slices).")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="VQ-VAE and PixelCNN: stop after this many epochs without "
+                             "validation improvement (0 = train for all --epochs).")
+    parser.add_argument("--grad-clip", type=float, default=0.0,
+                        help="PixelCNN: clip the gradient norm to this value (0 = off).")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if args.lr is None:
