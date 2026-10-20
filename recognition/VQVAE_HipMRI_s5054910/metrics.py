@@ -3,7 +3,8 @@
 # Author:  Gurkirat Singh Randhawa (s5054910)
 # Course:  COMP3710 Pattern Recognition, The University of Queensland
 # Date:    October 2026
-# Purpose: Batched GPU SSIM: paired, best-match and pairwise scores.
+# Purpose: Batched GPU SSIM (paired, best-match, pairwise) and the FID / KID
+#          generation-quality metrics.
 # --------------------------------------------------------------------
 """
 metrics.py - Image similarity metrics for evaluating generated slices.
@@ -12,6 +13,12 @@ Implements the Structural Similarity Index (SSIM; Wang et al., 2004) in
 PyTorch so that many image pairs can be scored at once on the GPU. Uses the
 standard settings: 11 x 11 Gaussian window with sigma 1.5, K1 = 0.01,
 K2 = 0.03, and images in [0, 1].
+
+Also computes the Frechet Inception Distance (FID; Heusel et al., 2017) and the
+Kernel Inception Distance (KID; Binkowski et al., 2018) from the 2048-d pool
+features of the standard FID Inception-v3 network (pytorch-fid). That
+pre-trained network is used only to measure generated images, as permitted by
+the course staff; every generative model here is trained from scratch.
 """
 
 import torch
@@ -117,3 +124,69 @@ def best_match_ssim(queries, references, device, query_batch=16,
             indices[q_start:q_end][better] = chunk_indices[better] + r_start
 
     return scores.cpu(), indices.cpu()
+
+
+# ----------------------------------------------------------------------------
+# FID and KID (generation quality)
+# ----------------------------------------------------------------------------
+
+@torch.no_grad()
+def inception_features(images, device, batch_size=50):
+    """2048-d Inception-v3 pool features of (N, 1, H, W) images in [0, 1]."""
+    # Imported here so the SSIM functions work without pytorch-fid installed.
+    from pytorch_fid.inception import InceptionV3
+
+    # resize_input scales to 299 x 299 and normalize_input maps [0, 1] to [-1, 1],
+    # exactly as in the reference FID implementation.
+    model = InceptionV3([InceptionV3.BLOCK_INDEX_BY_DIM[2048]],
+                        resize_input=True, normalize_input=True).to(device).eval()
+    features = []
+    for start in range(0, images.size(0), batch_size):
+        # Grayscale MRI is repeated over three channels to match the RGB network.
+        batch = images[start:start + batch_size].to(device).float().repeat(1, 3, 1, 1)
+        features.append(model(batch)[0].flatten(1).cpu())
+    return torch.cat(features).double()
+
+
+def frechet_distance(first, second):
+    """FID between two feature sets: distance between Gaussians fitted to each.
+
+    FID = |mu1 - mu2|^2 + Tr(S1 + S2 - 2 (S1 S2)^1/2). The trace of (S1 S2)^1/2
+    equals that of (S1^1/2 S2 S1^1/2)^1/2, a symmetric matrix, so it can be
+    computed stably from eigenvalues instead of a general matrix square root.
+    """
+    mu1, mu2 = first.mean(0), second.mean(0)
+    s1, s2 = torch.cov(first.T), torch.cov(second.T)
+    # Symmetric square root of S1 from its eigendecomposition (tiny negatives clipped).
+    vals, vecs = torch.linalg.eigh(s1)
+    s1_half = vecs @ torch.diag(vals.clamp(min=0).sqrt()) @ vecs.T
+    inner = torch.linalg.eigvalsh(s1_half @ s2 @ s1_half).clamp(min=0)
+    trace_term = s1.trace() + s2.trace() - 2 * inner.sqrt().sum()
+    return ((mu1 - mu2).pow(2).sum() + trace_term).item()
+
+
+def kernel_inception_distance(first, second, subsets=100, subset_size=500, seed=0):
+    """KID as (mean, std) over random subsets: unbiased MMD^2 with a cubic kernel.
+
+    Unlike FID, KID has no bias from small sample sizes, so it is the fairer
+    comparison when only a few hundred real slices are available.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    size = min(subset_size, len(first), len(second))
+    dim = first.size(1)
+    scores = []
+    for _ in range(subsets):
+        x = first[torch.randperm(len(first), generator=generator)[:size]]
+        y = second[torch.randperm(len(second), generator=generator)[:size]]
+        # Polynomial kernel k(a, b) = (a.b / d + 1)^3, the standard KID choice.
+        k_xx = (x @ x.T / dim + 1) ** 3
+        k_yy = (y @ y.T / dim + 1) ** 3
+        k_xy = (x @ y.T / dim + 1) ** 3
+        # Diagonal terms are left out of the within-set means, which makes MMD^2 unbiased.
+        off_diag = size * (size - 1)
+        mmd = ((k_xx.sum() - k_xx.diagonal().sum()) / off_diag
+               + (k_yy.sum() - k_yy.diagonal().sum()) / off_diag
+               - 2 * k_xy.mean())
+        scores.append(mmd.item())
+    scores = torch.tensor(scores)
+    return scores.mean().item(), scores.std().item()
