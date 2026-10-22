@@ -399,3 +399,129 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 | + bottom prior (conditioned) | 15,009,024 | 4.66 GB | ~33 min (early stop) | } (both priors + decoder) |
 
 **Latency** is timed over 256 samples generated together. A PixelCNN needs one network pass per code position: 512 + 2,048 passes for VQ-VAE-2. That makes it compute-bound, so larger batches did not reduce the time per sample. Every model meets the 2 h / 8 GB training budget; only VQ sampling misses 1 s per slice.
+
+### 7.6 Error autopsies
+
+**Case 1. Jumbled global anatomy (single-level prior).**
+- **Failure mode:** realistic texture, but no coherent pelvis. Hip joints were missing, the bladder was often in the left third of the image, and occasionally there were two bladders.
+- **Root trigger:** the prior places 2,048 codes of 4×4 px in raster order. Early rows are fixed before anything decides where the later anatomy belongs.
+- **Fix:** VQ-VAE-2's 8×8-px top level plans the layout first. FID improves by about 45 at every temperature, and the bladder is centred far more often (compare the two right-hand panels of Figure 6). **Fixed.**
+
+**Case 2. The prior overfits a small cohort.**
+- **Failure mode:** validation loss bottoms out within 3–8 epochs and then rises, while training loss keeps falling (Figure 7).
+- **Root trigger:** 31 patients, and neighbouring slices that are near-duplicates.
+- **Fix:** the four defences in §7.4. The gap remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
+
+**Case 3. WGAN-GP copies training slices.**
+- **Failure mode:** 9.4 % of WGAN-GP samples on validation (5.0 of 256 on test) are closer to a specific training slice than any real unseen patient ever is.
+- **Root trigger:** the critic is only loosely constrained (gradient-penalty term about 2), and nothing in the GAN objective discourages reproducing a training example. Its Wasserstein estimate *rose* from 40 to 62 while the images improved, so the loss gave no warning.
+- **Lesson:** a good average hides leaky tails, so audit the tail of the distribution, not just the mean.
+
+![WGAN-GP nearest neighbours](images/wgan_gp_nearest_neighbours.png)
+
+**Case 4. The prior, not the decoder, limits FID.**
+- **Failure mode:** VQ-VAE-2 + aug samples score FID 127 on test, far above the real floor of 51.
+- **Diagnosis:** we scored the autoencoder's *reconstructions* of the floor slices with `predict.py --model vqvae2 --fid`. This splits the gap into two parts:
+  ```
+  test FID:  51 ─────── 65 ────────────────────── 127
+            real     reconstructed           generated
+            floor    (decoder costs 14)      (prior costs 62)
+  ```
+- **Root trigger:** raster-order PixelCNN sampling produces less realistic texture statistics than a GAN. The decoder alone is not the bottleneck.
+- **Next step:** a stronger prior (a transformer, as in VQGAN), rather than a better decoder.
+
+**Case 5. Smoothing of finely textured slices.**
+- **Failure mode:** the worst test reconstructions (SSIM 0.889) are slices with fine high-contrast texture, such as muscle striations and bowel gas. The error concentrates along fine edges (Figure 3, right).
+- **Root trigger:** each bottom code covers a 4×4 patch, and the MSE loss favours blurry averages over sharp guesses.
+- **Next step:** add a perceptual or adversarial term to the decoder loss.
+
+### 7.7 Outcome against the feasibility criteria
+
+| Criterion | VQ-VAE-2 + aug | DCGAN + aug |
+|---|---|---|
+| 1. Reconstruction SSIM > 0.6 | ✅ 0.919 (min 0.889) | — |
+| 2. FID/KID close to the floor | ❌ 127 vs 51 | ⚠️ 86 vs 51, the closest |
+| 3. No memorisation (≤ 5 %) | ✅ 0.4 %, less similar to train than real patients | ✅ 0.4 % |
+| 4. Diversity ≈ real | ✅ 0.176 vs 0.193 | ✅ 0.161 vs 0.193 |
+| 5. Benchmarked on the same split | ✅ | ✅ |
+| 6. Resources (≤ 2 h, ≤ 8 GB) | ✅ (but 1.48 s per sample) | ✅ |
+
+### 7.8 Recommendation for the project manager
+
+**For a shareable synthetic cohort, ship DCGAN + aug.** On test patients it has:
+- the best perceptual quality (FID 86, KID 51);
+- the same privacy as the Hard model (0.4 % near-copies);
+- diversity close to real;
+- sampling about **8,000× faster** (0.18 ms per slice, so a 10,000-slice cohort takes about 2 seconds instead of about 4 GPU-hours).
+
+**Keep VQ-VAE-2 + aug for anything that needs an encoder:**
+- compressing or reconstructing real scans (SSIM 0.919);
+- smooth latent interpolation between patients (0.92 vs 0.75);
+- a model whose likelihood can be measured and monitored for overfitting.
+
+| If the priority is… | Choose | Trade-off |
+|---|---|---|
+| Realistic synthetic slices, fast | DCGAN + aug | No encoder; jumpy latent space; no likelihood |
+| Reconstruction, compression, smooth latent paths | VQ-VAE-2 + aug, T = 0.9 | FID 127; 1.48 s per slice |
+| Lowest copying risk at any cost | VQ-VAE-2 + aug, T = 0.95 | 0.1 % near-copies, but FID 148 |
+| Avoid | WGAN-GP | 9.4 % near-copies on validation |
+
+**Before any release, whichever model is used:**
+1. Run the near-copy audit and drop samples above the real-patient maximum.
+2. Have a radiologist review a random subset.
+3. Use flip augmentation; it was the single most effective change for both families.
+
+## 8. Discussion and conclusion
+
+**What worked.**
+- **The Hard model reaches all three of its core goals:**
+  - reconstruction SSIM 0.919 on unseen patients (target 0.6);
+  - near-copy rate 0.4 %;
+  - sample diversity close to real data.
+- **Two-level structure** fixed the jumbled anatomy of the single-level model, and FID confirmed the visual improvement (about 45 points).
+- **Flip augmentation** was the most valuable single change. It halved DCGAN's KID, and it cured VQ-VAE-2's tendency to stay close to training slices.
+- **The evaluation can be trusted:**
+  - selection on validation only;
+  - test scored once;
+  - three seeds per configuration;
+  - a real-data floor for context;
+  - 25 tests checking the models, the masks and every metric against reference implementations.
+
+**What did not work.**
+- **Perceptual quality:** VQ-VAE-2 does not beat the best GAN baseline. The decoder diagnostic shows the reason: the PixelCNN prior accounts for most of the gap to real data.
+- **Speed:** PixelCNN sampling is about 8,000× slower than a GAN, and no batching can fix this, because it is sequential by design.
+
+**Answer to the research dilemma.** On this dataset, the likelihood-based model is the better *autoencoder* and an equally private generator, but not the better *sampler*. The best adversarial baseline, once augmented, produces more realistic slices far faster with the same privacy.
+
+**Limitations.**
+- Only 31 training patients and 3 test patients, so test numbers carry real uncertainty.
+- FID uses ImageNet features, which suit MRI imperfectly.
+- Slices are generated in 2D, without consistency between neighbouring slices.
+
+**Future work, by expected value:**
+1. A transformer or MaskGIT-style prior, for better and parallel sampling.
+2. A perceptual or adversarial decoder loss, as in VQGAN, for sharper texture.
+3. An MRI-specific feature extractor for FID.
+4. 3D generation, for volume consistency.
+
+## 9. Artificial Intelligence Usage Disclosure
+
+*To be written by the author.* It should cover:
+- which AI tool was used, and for what;
+- which decisions and work were the author's own;
+- how its outputs were checked;
+- a link to the conversation history or `prompt_history.pdf`.
+
+## 10. References
+
+- Bińkowski, M., Sutherland, D. J., Arbel, M. & Gretton, A. (2018). Demystifying MMD GANs. *ICLR*.
+- Dhariwal, P. et al. (2020). Jukebox: A generative model for music. *arXiv:2005.00341*.
+- Gulrajani, I. et al. (2017). Improved training of Wasserstein GANs. *NeurIPS*.
+- Heusel, M. et al. (2017). GANs trained by a two time-scale update rule converge to a local Nash equilibrium. *NeurIPS*.
+- Loshchilov, I. & Hutter, F. (2019). Decoupled weight decay regularization. *ICLR*.
+- Radford, A., Metz, L. & Chintala, S. (2015). Unsupervised representation learning with deep convolutional GANs. *arXiv:1511.06434*.
+- Razavi, A., van den Oord, A. & Vinyals, O. (2019). Generating diverse high-fidelity images with VQ-VAE-2. *NeurIPS*.
+- Szegedy, C. et al. (2016). Rethinking the Inception architecture for computer vision. *CVPR*.
+- van den Oord, A. et al. (2016). Conditional image generation with PixelCNN decoders. *NeurIPS*.
+- van den Oord, A., Vinyals, O. & Kavukcuoglu, K. (2017). Neural discrete representation learning. *NeurIPS*.
+- Wang, Z. et al. (2004). Image quality assessment: From error visibility to structural similarity. *IEEE TIP*, 13(4).
