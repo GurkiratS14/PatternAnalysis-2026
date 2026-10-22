@@ -1,0 +1,19 @@
+Device: cuda
+Loaded bottom prior from epoch 8 (5.417 bits per code on validation)
+Loaded top prior from epoch 5 (5.945 bits per code on validation)
+Seed 0: near-copies 7/256, vs train 0.291, vs held-out 0.244, pairwise 0.207 (coarse 0.140)
+Seed 1: near-copies 6/256, vs train 0.292, vs held-out 0.245, pairwise 0.212 (coarse 0.151)
+Seed 2: near-copies 6/256, vs train 0.293, vs held-out 0.243, pairwise 0.211 (coarse 0.144)
+
+Generated 256 samples per seed, 1476.78 ms per image
+Reference (validate): 4 held-out patients, best-match SSIM vs train mean 0.259, max 0.374
+Over 3 seed(s), mean +/- std:
+  generated_vs_heldout_mean    0.244 +/- 0.001
+  generated_vs_train_mean      0.292 +/- 0.001
+  generated_vs_train_max       0.401 +/- 0.010
+  count_above_real_max         6.333 +/- 0.577
+  pairwise_ssim                0.210 +/- 0.003
+  pairwise_ssim_coarse         0.145 +/- 0.006
+  pairwise_ssim (real)         0.154
+  pairwise_ssim_coarse (real)  0.134
+Outputs saved to /home/Student/s5054910/hipmri_runs/pixelcnn2/eval_validate

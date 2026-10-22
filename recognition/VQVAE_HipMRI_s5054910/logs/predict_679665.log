@@ -1,0 +1,7 @@
+Device: cuda
+Loaded cached samples from /home/Student/s5054910/hipmri_runs/pixelcnn_reg/samples/samples_t0.95_seed0_3x256.pt
+
+Reference (test): 3 patients, 540 slices; 768 scored slices per set
+  Generated                FID  174.42   KID x1000 175.03 +/- 1.79
+  Real train (floor)       FID   50.90   KID x1000  10.05 +/- 0.45
+Outputs saved to /home/Student/s5054910/hipmri_runs/pixelcnn_reg/eval_t0.95_test

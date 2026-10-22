@@ -1,0 +1,3 @@
+Device: cuda
+Consecutive-frame SSIM: model mean 0.754, min 0.344; cross-fade mean 0.949, min 0.897
+Outputs saved to /home/Student/s5054910/hipmri_runs/dcgan_aug/interpolation

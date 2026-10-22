@@ -1,0 +1,4 @@
+Device: cuda
+Consecutive-frame SSIM: model mean 0.923, min 0.894; cross-fade mean 0.951, min 0.911
+Largest share of codes changing in one step, per path: 65%, 65%, 65%, 69%
+Outputs saved to /home/Student/s5054910/hipmri_runs/vqvae2_aug/interpolation

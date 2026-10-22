@@ -1,0 +1,17 @@
+Device: cuda
+Seed 0: near-copies 4/256, vs train 0.265, vs held-out 0.206, pairwise 0.159 (coarse 0.107)
+Seed 1: near-copies 5/256, vs train 0.266, vs held-out 0.206, pairwise 0.164 (coarse 0.109)
+Seed 2: near-copies 6/256, vs train 0.268, vs held-out 0.208, pairwise 0.161 (coarse 0.103)
+
+Generated 256 samples per seed, 0.17 ms per image
+Reference (validate): 4 held-out patients, best-match SSIM vs train mean 0.259, max 0.374
+Over 3 seed(s), mean +/- std:
+  generated_vs_heldout_mean    0.207 +/- 0.001
+  generated_vs_train_mean      0.266 +/- 0.001
+  generated_vs_train_max       0.422 +/- 0.006
+  count_above_real_max         5.000 +/- 1.000
+  pairwise_ssim                0.161 +/- 0.003
+  pairwise_ssim_coarse         0.106 +/- 0.003
+  pairwise_ssim (real)         0.154
+  pairwise_ssim_coarse (real)  0.134
+Outputs saved to /home/Student/s5054910/hipmri_runs/dcgan_aug/eval_validate

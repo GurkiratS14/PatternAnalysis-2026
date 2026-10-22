@@ -1,0 +1,9 @@
+Device: cuda
+Loaded bottom prior from epoch 8 (5.067 bits per code on validation)
+Loaded top prior from epoch 3 (5.558 bits per code on validation)
+Saved samples to /home/Student/s5054910/hipmri_runs/pixelcnn2_aug/samples/samples_t1_seed0_3x256.pt
+
+Reference (validate): 4 patients, 660 slices; 768 scored slices per set
+  Generated                FID  162.73   KID x1000 177.32 +/- 2.63
+  Real train (floor)       FID   59.20   KID x1000  16.66 +/- 0.76
+Outputs saved to /home/Student/s5054910/hipmri_runs/pixelcnn2_aug/eval_validate

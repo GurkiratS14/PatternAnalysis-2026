@@ -1,0 +1,6 @@
+Device: cuda
+
+Reference (test): 3 patients, 540 slices; 768 scored slices per set
+  Reconstructed train      FID   65.27   KID x1000  29.30 +/- 0.59
+  Real train (floor)       FID   50.90   KID x1000  10.05 +/- 0.45
+Outputs saved to /home/Student/s5054910/hipmri_runs/vqvae2_aug/eval_test

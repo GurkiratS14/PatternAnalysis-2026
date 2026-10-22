@@ -1,0 +1,7 @@
+Device: cuda
+Saved samples to /home/Student/s5054910/hipmri_runs/dcgan/samples/samples_t1_seed0_3x256.pt
+
+Reference (validate): 4 patients, 660 slices; 768 generated slices
+  Generated            FID  120.35   KID x1000 101.39 +/- 1.71
+  Real train (floor)   FID   59.20   KID x1000  16.66 +/- 0.76
+Outputs saved to /home/Student/s5054910/hipmri_runs/dcgan/eval_validate

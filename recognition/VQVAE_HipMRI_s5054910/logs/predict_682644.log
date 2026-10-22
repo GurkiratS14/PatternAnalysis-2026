@@ -1,0 +1,6 @@
+Device: cuda
+Loaded epoch 100 (validation SSIM 0.906)
+
+Reconstruction SSIM on 540 test slices: mean 0.919, std 0.014, min 0.889, max 0.949, 100% above 0.6
+Reconstruction MSE 0.00088, 0.39 ms per image, codes used per level [507, 512] of 512
+Outputs saved to /home/Student/s5054910/hipmri_runs/vqvae2_aug/eval

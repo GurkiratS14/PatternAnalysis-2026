@@ -1,0 +1,20 @@
+Device: cuda
+Encoded 22920 training and 660 validation slices into 16 x 32 code grids (top level)
+PixelCNN parameters: 13,724,800 (dropout 0.3, weight decay 0.01)
+Epoch   1/40  train_bits 6.336  val_bits 5.878  27s
+Epoch   2/40  train_bits 5.497  val_bits 5.628  27s
+Epoch   3/40  train_bits 5.264  val_bits 5.558  27s
+Epoch   4/40  train_bits 5.131  val_bits 5.574  27s
+Epoch   5/40  train_bits 5.031  val_bits 5.586  27s
+Epoch   6/40  train_bits 4.948  val_bits 5.616  27s
+Epoch   7/40  train_bits 4.876  val_bits 5.679  27s
+Epoch   8/40  train_bits 4.810  val_bits 5.738  27s
+Epoch   9/40  train_bits 4.750  val_bits 5.807  27s
+Epoch  10/40  train_bits 4.694  val_bits 5.906  27s
+Epoch  11/40  train_bits 4.641  val_bits 5.971  27s
+Epoch  12/40  train_bits 4.591  val_bits 6.023  27s
+Epoch  13/40  train_bits 4.543  val_bits 6.140  27s
+Early stopping at epoch 13: no improvement for 10 epochs
+Best validation: 5.558 bits per code (epoch 3)
+Peak GPU memory: 2.69 GB
+Outputs saved to /home/Student/s5054910/hipmri_runs/pixelcnn2_aug_top

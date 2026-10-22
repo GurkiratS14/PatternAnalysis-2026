@@ -1,0 +1,7 @@
+Device: cuda
+Loaded cached samples from /home/Student/s5054910/hipmri_runs/dcgan/samples/samples_t1_seed0_3x256.pt
+
+Reference (test): 3 patients, 540 slices; 768 scored slices per set
+  Generated                FID  119.21   KID x1000 101.87 +/- 1.51
+  Real train (floor)       FID   50.90   KID x1000  10.05 +/- 0.45
+Outputs saved to /home/Student/s5054910/hipmri_runs/dcgan/eval_test
