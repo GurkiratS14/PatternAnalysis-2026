@@ -329,6 +329,12 @@ Validation reference: 4 patients. Real floor: FID 59.2, KID 16.7. Real slices: s
 - **Best Hard-model configuration:** VQ-VAE-2 + aug at T = 0.9, whose KID does not overlap with the 136.4 ± 1.7 of the next-best admissible VQ configuration.
 - **Within the VQ family:** two levels beat one by about 45 FID, and augmentation removed most of the memorisation, cutting near-copies at T = 0.9 from 8.6 % to 1.2 %.
 
+![Quality vs temperature](images/summary_quality_vs_temperature.png)
+*Figure 6. Validation KID against sampling temperature. Two levels beat one at every temperature, and lower temperature improves quality but raises copying (hollow marker = fails the 5 % limit).*
+
+![Privacy vs quality](images/summary_privacy_vs_quality.png)
+*Figure 7. The selection rule as a picture: every configuration's near-copy rate against its KID. Configurations in the shaded region are not admissible; among the rest, the lowest point wins.*
+
 ### 7.3 Final benchmark (test patients, scored once)
 
 Test reference: 3 patients. Real floor: FID 50.9, KID 10.1. Real slices: similarity to train 0.301, pairwise 0.193.
@@ -351,7 +357,7 @@ Test reference: 3 patients. Real floor: FID 50.9, KID 10.1. Real slices: similar
 |---|---|---|---|
 | ![](images/dcgan_aug_samples.png) | ![](images/wgan_gp_samples.png) | ![](images/vqvae_samples_t0.95.png) | ![](images/vqvae2_aug_samples_t0.9.png) |
 
-*Figure 6. Uncurated samples from each model family.*
+*Figure 8. Uncurated samples from each model family.*
 
 **Interpolation** (consecutive-frame SSIM along 4 paths × 8 frames; a pixel cross-fade of the same end frames gives about 0.95):
 
@@ -372,7 +378,7 @@ The GAN paths jump abruptly. The VQ-VAE-2 paths are smooth: at most 65–69 % of
 |---|---|---|
 | ![](images/dcgan_aug_training_curves.png) | ![](images/wgan_gp_training_curves.png) | ![](images/vqvae_training_curves.png) |
 
-*Figure 7. Training curves of every final model.*
+*Figure 9. Training curves of every final model.*
 
 **Autoencoder.** Validation SSIM rose steadily to 0.906 at epoch 100, so early stopping never triggered.
 
@@ -405,10 +411,10 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 **Case 1. Jumbled global anatomy (single-level prior).**
 - **Failure mode:** realistic texture, but no coherent pelvis. Hip joints were missing, the bladder was often in the left third of the image, and occasionally there were two bladders.
 - **Root trigger:** the prior places 2,048 codes of 4×4 px in raster order. Early rows are fixed before anything decides where the later anatomy belongs.
-- **Fix:** VQ-VAE-2's 8×8-px top level plans the layout first. FID improves by about 45 at every temperature, and the bladder is centred far more often (compare the two right-hand panels of Figure 6). **Fixed.**
+- **Fix:** VQ-VAE-2's 8×8-px top level plans the layout first. FID improves by about 45 at every temperature, and the bladder is centred far more often (compare the two right-hand panels of Figure 8). **Fixed.**
 
 **Case 2. The prior overfits a small cohort.**
-- **Failure mode:** validation loss bottoms out within 3–8 epochs and then rises, while training loss keeps falling (Figure 7).
+- **Failure mode:** validation loss bottoms out within 3–8 epochs and then rises, while training loss keeps falling (Figure 9).
 - **Root trigger:** 31 patients, and neighbouring slices that are near-duplicates.
 - **Fix:** the four defences in §7.4. The gap remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
 
