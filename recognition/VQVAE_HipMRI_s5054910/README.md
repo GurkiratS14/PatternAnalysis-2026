@@ -191,3 +191,211 @@ Hardware: one NVIDIA A100 on UQ's Rangpur cluster (`comp3710` partition). The Sl
 - **Reported spread:** every generation metric is a mean ± std over 3 seeds, because near-copy counts alone varied by 0–3 between runs.
 - **Logs:** the training and evaluation logs behind every number are in [`logs/`](logs/).
 - **Weights:** not committed (size); the commands in §5 recreate the Hard model in about 1 A100-hour.
+
+## 5. Usage, file structure, example inputs and outputs
+
+```
+dataset.py         NIfTI loading, transpose, centre-crop, per-slice normalisation, flip augmentation,
+                   patient-leakage check
+modules.py         DCGAN generator/discriminator, WGAN-GP critic, VQ-VAE, VQ-VAE-2, gated PixelCNN
+metrics.py         batched GPU SSIM (paired, best-match, pairwise), FID and KID
+train.py           training driver for every model
+predict.py         evaluation driver: reconstruction, FID/KID, memorisation audit, interpolation
+slurm_train.sh     Slurm job for train.py on one A100
+slurm_predict.sh   Slurm job for predict.py on one A100
+tests/             25 tests: model shapes, PixelCNN causality, preprocessing, metrics
+images/            figures used in this README
+logs/              training and evaluation logs of the final runs
+```
+
+**Train the final Hard model** (outputs go to `~/hipmri_runs/<run>/`):
+```bash
+python3 dataset.py && python3 -m pytest tests/ -q        # data audit, then 25 tests
+sbatch slurm_train.sh --model vqvae2 --epochs 100 --augment --patience 10 --run-name vqvae2_aug
+P="--augment --grad-clip 1.0 --patience 10 --prior-dropout 0.3 --weight-decay 0.01 --batch-size 32 --epochs 40"
+sbatch slurm_train.sh --model pixelcnn --level top    --vqvae-weights ~/hipmri_runs/vqvae2_aug/vqvae2.pt $P --run-name pixelcnn2_aug_top
+sbatch slurm_train.sh --model pixelcnn --level bottom --vqvae-weights ~/hipmri_runs/vqvae2_aug/vqvae2.pt $P --run-name pixelcnn2_aug
+```
+
+**Evaluate it:**
+```bash
+TOP="--top-weights ~/hipmri_runs/pixelcnn2_aug_top/pixelcnn.pt"
+sbatch slurm_predict.sh --model vqvae2 --run-name vqvae2_aug                     # reconstruction SSIM on test
+sbatch slurm_predict.sh --model pixelcnn2 --run-name pixelcnn2_aug $TOP --fid --repeats 3 --temperature 0.9 --reference validate
+sbatch slurm_predict.sh --model pixelcnn2 --run-name pixelcnn2_aug $TOP --repeats 3 --temperature 0.9 --reference validate
+sbatch slurm_predict.sh --model vqvae2 --run-name vqvae2_aug --interpolate
+```
+- **`--fid`:** FID/KID scoring; otherwise the memorisation audit runs.
+- **`--reference validate`:** use this while choosing settings.
+- **`--reference test`:** use this once, for the final numbers.
+
+**Baselines:**
+```bash
+sbatch slurm_train.sh --model dcgan --epochs 100 --augment --run-name dcgan_aug
+sbatch slurm_train.sh --model wgan_gp --epochs 500
+```
+
+**Example 1: reconstruction.**
+- **Input:** a test slice (1×128×256, values in [0, 1]).
+- **Output:** its reconstruction and the error map.
+- **Log line:** `Reconstruction SSIM on 540 test slices: mean 0.919, std 0.014, min 0.889, max 0.949, 100% above 0.6`
+
+![Reconstructions](images/vqvae2_aug_reconstructions.png)
+*Figure 3. Best and worst VQ-VAE-2 + aug test reconstructions. Rows: input, reconstruction, absolute error.*
+
+**Example 2: generation.**
+- **Input:** a random seed.
+- **Output:** new slices, each checked against its most similar training slice.
+
+![Nearest neighbours](images/vqvae2_aug_nearest_neighbours.png)
+*Figure 4. The six generated slices most similar to any training slice (top) and that training slice (bottom). Even the closest samples are new slices, not copies.*
+
+**Example 3: interpolation** between real test slices of different patients.
+
+![Interpolation](images/vqvae2_aug_interpolation.png)
+*Figure 5. VQ-VAE-2 + aug latent interpolation (each model path is followed by a pixel cross-fade of the same end frames).*
+
+## 6. Pre-processing and data splits
+
+**Data:** `HipMRI_Study_open/keras_slices_data` on Rangpur, 12,660 2D NIfTI slices from 38 patients. Only the images are used; the segmentation masks are not.
+
+| Step | What | Why |
+|---|---|---|
+| Transpose | 256×128 → 1×128×256 | Puts the body horizontal, as in a standard axial view |
+| Centre-crop | The 60 slices of 256×144 lose 8 rows top and bottom | One shape for every slice. Staff confirmed on Ed (#177) that these slices may even be discarded; cropping keeps them, and only background is removed |
+| Per-slice normalisation | Clip at the 99.5th percentile, scale to [0, 1] (GANs: [−1, 1] for tanh) | Raw scales differ between scans (e.g. 0–411); clipping stops a few bright pixels squashing the rest |
+| Augmentation (training only) | Random left-right flip; the priors learn from the codes of every slice *and* its mirror | Pelvic anatomy is roughly left-right symmetric, and 31 patients is a small cohort |
+
+**Splits:** the provided patient folders.
+
+| Split | Patients | Slices | Used for |
+|---|---|---|---|
+| Train | 31 | 11,460 | fitting every model |
+| Validate | 4 | 660 | checkpoints, early stopping, temperature and model choice |
+| Test | 3 | 540 | final numbers only, scored once |
+
+**Why these splits:**
+- **Split by patient, not by slice.** Neighbouring slices of one patient are nearly identical. A slice-level split would put near-duplicates in both train and test, inflate every score and hide memorisation. `check_no_patient_leakage()` confirms zero overlap (and a test checks that it catches a shared patient).
+- **Validation chooses, test reports.** Choosing a temperature or model by looking at test scores would bias the reported numbers upwards. Every decision in §7 was made on validation patients, and test patients were scored once at the end.
+- **Same split for every model,** so the benchmark is like for like.
+
+## 7. Open Research Dilemma
+
+**Question:** does a likelihood-based discrete-latent model (VQ-VAE-2 + PixelCNN priors) beat adversarial baselines at generating *realistic, diverse and non-memorised* MRI, and at what cost?
+
+### 7.1 Evaluation protocol
+
+Following the staff answer on Ed (20 Oct):
+- **The SSIM > 0.6 target applies to paired reconstructions only.** Each test slice is compared with its own reconstruction.
+- **Generation quality is measured with FID and KID** on Inception-v3 features.
+- **SSIM between generated and real slices is used only to detect copying,** never as a quality target. Forcing high unpaired SSIM would reward memorisation.
+
+| Metric | What it measures | Good value |
+|---|---|---|
+| Reconstruction SSIM | autoencoder(x) vs x on test slices | > 0.6 |
+| FID (Heusel et al., 2017) | distance between Inception feature distributions of generated and real slices | close to the real floor |
+| KID ×1000 (Bińkowski et al., 2018) | the same idea, but unbiased at small sample sizes, so it is the main metric | close to the real floor |
+| Real floor | FID/KID of 768 random *real training* slices against the reference | the best a generator can expect |
+| Near-copies | samples closer to a training slice (SSIM) than any real held-out slice ever is | ≤ 5 % |
+| Similarity to train | mean SSIM of each sample to its closest training slice | ≤ real held-out |
+| Pairwise SSIM | mean SSIM between samples (diversity) | ≤ real held-out |
+
+Each generator is scored on **3 seeds × 256 samples**: 768 slices against 660 validation or 540 test slices.
+
+**Selection rule, fixed before any FID was computed:**
+1. Admissible = near-copies ≤ 5 % on validation.
+2. Among admissible configurations, pick the lowest validation KID.
+3. If KIDs overlap within their std, pick the one with fewer near-copies.
+
+### 7.2 Model selection (validation patients only)
+
+Validation reference: 4 patients. Real floor: FID 59.2, KID 16.7. Real slices: similarity to train 0.259, pairwise 0.154.
+
+| Model | FID ↓ | KID×1000 ↓ | Near-copies | Sim. to train | Pairwise | Admissible |
+|---|---|---|---|---|---|---|
+| DCGAN | 120.4 | 101.4 ± 1.7 | 2.6 % | 0.271 | 0.155 | ✅ |
+| **DCGAN + aug** | **85.9** | **52.1 ± 1.3** | 2.0 % | 0.266 | 0.161 | ✅ **selected** |
+| WGAN-GP | 129.5 | 108.5 ± 1.8 | 9.4 % | 0.297 | 0.174 | ❌ |
+| VQ-VAE, T = 1.0 / 0.95 / 0.9 | 195.3 / 185.2 / 184.5 | 216.2 / 199.3 / 196.8 | 0.4 / 1.4 / 3.5 % | 0.267–0.294 | 0.181–0.223 | ✅ |
+| VQ-VAE-2, T = 1.0 | 146.6 | 145.3 ± 1.6 | 2.5 % | 0.292 | 0.210 | ✅ |
+| VQ-VAE-2, T = 0.95 | 141.8 | 136.4 ± 1.7 | 4.6 % | 0.303 | 0.227 | ✅ |
+| VQ-VAE-2, T = 0.9 | 136.8 | 127.8 ± 1.9 | 8.6 % | 0.315 | 0.247 | ❌ |
+| VQ-VAE-2 + aug, T = 1.0 | 162.7 | 177.3 ± 2.6 | 0.4 % | 0.237 | 0.144 | ✅ |
+| VQ-VAE-2 + aug, T = 0.95 | 147.7 | 152.4 ± 2.3 | 0.1 % | 0.250 | 0.159 | ✅ |
+| **VQ-VAE-2 + aug, T = 0.9** | **135.1** | **130.9 ± 1.9** | 1.2 % | 0.264 | 0.176 | ✅ **best VQ** |
+
+**The rule's outcome:**
+- **Overall:** DCGAN + aug.
+- **Best Hard-model configuration:** VQ-VAE-2 + aug at T = 0.9, whose KID does not overlap with the 136.4 ± 1.7 of the next-best admissible VQ configuration.
+- **Within the VQ family:** two levels beat one by about 45 FID, and augmentation removed most of the memorisation, cutting near-copies at T = 0.9 from 8.6 % to 1.2 %.
+
+### 7.3 Final benchmark (test patients, scored once)
+
+Test reference: 3 patients. Real floor: FID 50.9, KID 10.1. Real slices: similarity to train 0.301, pairwise 0.193.
+
+| Model | FID ↓ | KID×1000 ↓ | Near-copies /256 | Sim. to train | Pairwise | Recon. SSIM |
+|---|---|---|---|---|---|---|
+| **DCGAN + aug** | **86.1** | **51.0 ± 1.3** | 1.0 ± 0.0 | 0.266 | 0.161 | — |
+| DCGAN | 119.2 | 101.9 ± 1.5 | 1.7 ± 1.2 | 0.271 | 0.155 | — |
+| WGAN-GP | 122.6 | 94.3 ± 1.8 | 5.0 ± 2.0 | 0.297 | 0.174 | — |
+| **VQ-VAE-2 + aug, T = 0.9** | 127.0 | 112.5 ± 1.9 | 1.0 ± 1.0 | 0.264 | 0.176 | **0.919** |
+| VQ-VAE-2, T = 0.95 | 127.5 | 110.6 ± 1.5 | 1.0 ± 1.0 | 0.303 | 0.227 | 0.901 |
+| VQ-VAE, T = 0.95 | 174.4 | 175.0 ± 1.8 | 0.3 ± 0.6 | 0.282 | 0.202 | 0.906 |
+
+**Findings:**
+- **The validation ranking held on test:** DCGAN + aug, then the GANs and VQ-VAE-2, then the single-level VQ-VAE. So the selection generalised.
+- **Augmentation helped VQ-VAE-2 everywhere except FID.** It improved reconstruction (0.901 → 0.919), privacy (similarity to train 0.303 → 0.264, now below real patients' 0.301) and diversity (0.227 → 0.176). On test FID/KID it was level with the non-augmented model.
+- **The best baseline wins on perceptual quality and speed.** Both final models are equally private (0.4 % near-copies).
+
+| DCGAN + aug | WGAN-GP | VQ-VAE, T = 0.95 | VQ-VAE-2 + aug, T = 0.9 |
+|---|---|---|---|
+| ![](images/dcgan_aug_samples.png) | ![](images/wgan_gp_samples.png) | ![](images/vqvae_samples_t0.95.png) | ![](images/vqvae2_aug_samples_t0.9.png) |
+
+*Figure 6. Uncurated samples from each model family.*
+
+**Interpolation** (consecutive-frame SSIM along 4 paths × 8 frames; a pixel cross-fade of the same end frames gives about 0.95):
+
+| Model | Mean | Min |
+|---|---|---|
+| DCGAN + aug | 0.754 | 0.344 |
+| VQ-VAE-2 + aug | **0.923** | **0.894** |
+
+The GAN paths jump abruptly. The VQ-VAE-2 paths are smooth: at most 65–69 % of codes change in one step.
+
+### 7.4 Training curves, early stopping and overfitting
+
+| VQ-VAE-2 + aug autoencoder | Top prior (+ aug) | Bottom prior (+ aug) |
+|---|---|---|
+| ![](images/vqvae2_aug_training_curves.png) | ![](images/pixelcnn2_aug_top_curves.png) | ![](images/pixelcnn2_aug_bottom_curves.png) |
+
+| DCGAN + aug | WGAN-GP | Single-level VQ-VAE |
+|---|---|---|
+| ![](images/dcgan_aug_training_curves.png) | ![](images/wgan_gp_training_curves.png) | ![](images/vqvae_training_curves.png) |
+
+*Figure 7. Training curves of every final model.*
+
+**Autoencoder.** Validation SSIM rose steadily to 0.906 at epoch 100, so early stopping never triggered.
+
+**Priors.** The priors overfit fast: training loss keeps falling while validation loss turns upwards after a few epochs. Four defences are used together:
+1. dropout 0.3;
+2. AdamW weight decay 0.01;
+3. flip augmentation, which doubles the training code grids to 22,920;
+4. early stopping with patience 10, keeping the best-validation checkpoint.
+
+The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 18 (best epoch 8). With augmentation, the bottom prior's best validation loss went from 5.42 to 5.07 bits per code. It is measured on a different autoencoder's codes, so this is only roughly comparable.
+
+**GANs** have no validation loss to stop on, so they train for a fixed budget (DCGAN 100 epochs, WGAN-GP 500), with sample grids saved every 5 epochs.
+
+### 7.5 Resource profiling (one A100)
+
+| Model | Parameters | Peak VRAM | Training time | Inference latency |
+|---|---|---|---|---|
+| DCGAN (+ aug) | G 14.4 M + D 11.2 M | 1.88 GB | ~14–16 min (100 epochs) | **0.18 ms / sample** |
+| WGAN-GP | G 14.4 M + critic 11.2 M | 2.54 GB | ~2 h (500 epochs) | 0.17 ms / sample |
+| VQ-VAE | 690,753 | 1.27 GB | ~9 min | 0.28 ms / reconstruction |
+| + single prior | 13,724,800 | 4.46 GB | ~32 min | 1.11 s / sample |
+| VQ-VAE-2 + aug | 1,653,889 | 1.55 GB | ~12 min | 0.39 ms / reconstruction |
+| + top prior | 13,724,800 | 2.69 GB | ~7 min (early stop) | } 1.48 s / sample |
+| + bottom prior (conditioned) | 15,009,024 | 4.66 GB | ~33 min (early stop) | } (both priors + decoder) |
+
+**Latency** is timed over 256 samples generated together. A PixelCNN needs one network pass per code position: 512 + 2,048 passes for VQ-VAE-2. That makes it compute-bound, so larger batches did not reduce the time per sample. Every model meets the 2 h / 8 GB training budget; only VQ sampling misses 1 s per slice.
