@@ -128,36 +128,47 @@ Each factor is a 512-way softmax.
 
 *One-page review, also available as [`feasibility_review.pdf`](feasibility_review.pdf).*
 
-> **Problem and goal.** Generate realistic 2D prostate MRI slices that a research group could share or use for augmentation without exposing real patients. Check whether a VQ-VAE-2 with learned priors gives slices that are realistic, diverse and not copied from training, compared with GAN baselines.
+> **Gurkirat Singh Randhawa (s5054910)** · COMP3710 · Domain 2.4 Image Generation · Hard difficulty · October 2026
 >
-> **Acceptance criteria.**
-> 1. Reconstruction: test SSIM > 0.6.
-> 2. Quality: FID / KID close to the real-data floor.
-> 3. No memorisation: ≤ 5 % of samples closer to a training slice than any real unseen patient.
-> 4. Diversity: no mode collapse (pairwise SSIM ≈ real).
-> 5. Comparison: against DCGAN and WGAN-GP on the same patient split.
-> 6. Resources: ≤ 2 h training per model, ≤ 8 GB GPU memory.
+> **Open dilemma:** can a generative model produce prostate MRI slices that are realistic and diverse **without memorising** the training patients?
 >
-> **Approach.**
-> - **Model:** VQ-VAE-2 compresses each slice into two grids of discrete codes, a coarse layout grid and a fine detail grid. Two PixelCNN priors learn which code grids are plausible; new slices come from sampling the priors and decoding.
-> - **Baselines:** DCGAN and WGAN-GP.
-> - **Data:** HipMRI, 38 patients, split 31 / 4 / 3 by patient (no leakage). Settings are chosen on validation; final numbers come from test.
+> **1. User need, scope and acceptance criteria**
 >
-> **Evidence so far.**
-> - Reconstruction SSIM 0.90 on test, with every slice above 0.6.
-> - The two-level model clearly improves anatomy over a single-level VQ-VAE (about 45 FID better).
-> - About 1 % near-copies for VQ-VAE-2, against 9 % for WGAN-GP.
-> - All models train in under 2 h at under 5 GB GPU memory.
+> **Intended user:** a research group holding the HipMRI study that wants a synthetic cohort it can share or use for augmentation without exposing real patients. **Prototype purpose:** test whether a VQ-VAE-2 with learned priors meets that need, and how it compares with GAN baselines. **Scope:** unconditional 2D slices (256×128), no segmentation labels.
 >
-> **Risks and fallback.**
+> 1. **Fidelity:** mean SSIM > 0.6 between test slices and their reconstructions.
+> 2. **Quality:** FID / KID against unseen patients, reported next to a real-data floor and the DCGAN / WGAN-GP baselines.
+> 3. **No memorisation:** ≤ 5 % of samples are *near-copies* (closer to a training slice than any real unseen slice is).
+> 4. **Diversity:** pairwise SSIM between samples no higher than between real slices (no mode collapse).
+> 5. **Resource constraint:** ≤ 2 h training per model and ≤ 8 GB peak VRAM on one A100.
 >
-> | Risk | Plan |
+> **2. Model choice and course concepts**
+>
+> - **Dataset configuration:** HipMRI 2D slices, 12,660 slices from 38 patients, split **31 / 4 / 3 by patient** (no leakage). Settings are chosen on validation; test is used once.
+> - **Model (Hard band):** VQ-VAE-2 encodes each slice into two grids of discrete codes: a 16×32 top grid for layout and a 32×64 bottom grid for detail, each with a 512-entry codebook. Two gated PixelCNN priors learn the code grids; sampling the priors and decoding gives new slices.
+> - **Course concepts:** convolutional autoencoders, vector quantisation, autoregressive models (masked convolutions), GANs, and regularisation (dropout, weight decay, early stopping, augmentation).
+> - **Literature:** VQ-VAE (van den Oord et al., 2017); VQ-VAE-2 (Razavi et al., 2019); gated PixelCNN (van den Oord et al., 2016); DCGAN (Radford et al., 2016); WGAN-GP (Gulrajani et al., 2017); FID (Heusel et al., 2017). The two-level design targets the known weakness of single-level priors: correct texture but incoherent global anatomy.
+>
+> **3. Preliminary feasibility evidence**
+>
+> - **Data audit:** all 38 patients load; zero patient overlap between splits (checked in code).
+> - **Reconstruction:** test SSIM **0.92** (every slice > 0.6) with 507 / 512 codes in use. **Criterion 1 met.**
+> - **Smoke test of generation:** the two-level model is about 45 FID better than a single-level VQ-VAE, with visibly coherent anatomy.
+> - **Memorisation:** about 1 % near-copies for VQ-VAE-2, against 9.4 % for WGAN-GP.
+> - **Measured resources:** every model trains in under 2 h at ≤ 4.7 GB VRAM. **Criterion 5 met.**
+>
+> **4. Risks, budget and fallback**
+>
+> | Risk | Mitigation |
 > |---|---|
-> | Prior overfits (small dataset) | Dropout, weight decay, augmentation, early stopping |
-> | Sampling is slow (about 1.5 s per slice) | Accept as a trade-off; faster prior as future work |
-> | GAN baseline scores better FID | Report honestly and compare trade-offs |
+> | Prior overfits 31 patients | Dropout, weight decay, left-right flip augmentation, early stopping, best checkpoint |
+> | Sampling is slow (about 1.5 s per slice) | Accept for offline cohort generation; a faster prior is future work |
+> | A GAN baseline scores better FID | Report honestly; recommend a model per use case |
+> | Codebook collapse | Dead-code restarts; monitor codes used |
 >
-> **Fallback:** WGAN-GP with the same evaluation (Normal difficulty).
+> **Computing budget:** about 15 A100 GPU-hours on Rangpur in total; only best checkpoints are kept.\
+> **Next planned experiment:** one-off test-set benchmark of the selected configurations (3 seeds × 256 samples).\
+> **Fallback:** WGAN-GP or DCGAN with the same evaluation (Normal band).
 
 The final outcome against each criterion is in §7.7.
 
@@ -445,12 +456,11 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 
 | Criterion | VQ-VAE-2 + aug | DCGAN + aug |
 |---|---|---|
-| 1. Reconstruction SSIM > 0.6 | ✅ 0.919 (min 0.889) | — |
-| 2. FID/KID close to the floor | ❌ 127 vs 51 | ⚠️ 86 vs 51, the closest |
-| 3. No memorisation (≤ 5 %) | ✅ 0.4 %, less similar to train than real patients | ✅ 0.4 % |
-| 4. Diversity ≈ real | ✅ 0.176 vs 0.193 | ✅ 0.161 vs 0.193 |
-| 5. Benchmarked on the same split | ✅ | ✅ |
-| 6. Resources (≤ 2 h, ≤ 8 GB) | ✅ (but 1.48 s per sample) | ✅ |
+| 1. Fidelity: reconstruction SSIM > 0.6 | ✅ 0.919 (min 0.889) | — |
+| 2. Quality vs floor and baselines | ❌ 127 vs floor 51 | ⚠️ 86 vs floor 51, best of all models |
+| 3. No memorisation (≤ 5 % near-copies) | ✅ 0.4 %, less similar to train than real patients | ✅ 0.4 % |
+| 4. Diversity (pairwise ≤ real) | ✅ 0.176 vs 0.193 | ✅ 0.161 vs 0.193 |
+| 5. Resources (≤ 2 h, ≤ 8 GB) | ✅ (but 1.48 s per sample) | ✅ |
 
 ### 7.8 Recommendation for the project manager
 
