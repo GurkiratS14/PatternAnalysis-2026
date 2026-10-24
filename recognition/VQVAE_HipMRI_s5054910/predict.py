@@ -93,7 +93,7 @@ def load_autoencoder(weights_path, device):
 
 def load_prior(weights_path, device):
     """Rebuild a trained PixelCNN prior in evaluation mode."""
-    checkpoint = torch.load(weights_path, map_location=device)
+    checkpoint = torch.load(os.path.expanduser(weights_path), map_location=device)
     prior = PixelCNN(**checkpoint["config"]).to(device)
     prior.load_state_dict(checkpoint["model"])
     print(f"Loaded {checkpoint.get('level', 'single')} prior from epoch {checkpoint['epoch']} "
@@ -120,7 +120,8 @@ def make_sampler(args, weights, device):
     if args.model == "pixelcnn":
         def sample_prior(count):
             """Sample `count` code grids from the prior and decode them."""
-            codes = prior.sample(count, height, width, device, args.temperature)
+            codes = prior.sample(count, height, width, device, args.temperature,
+                                 top_k=args.top_k, top_p=args.top_p)
             return vqvae.decode_levels([codes]).clamp(0, 1)
         return sample_prior
 
@@ -132,8 +133,12 @@ def make_sampler(args, weights, device):
 
     def sample_two_level(count):
         """Sample a top layout, then bottom detail conditioned on it, and decode."""
-        top = top_prior.sample(count, top_height, top_width, device, args.temperature)
-        bottom = prior.sample(count, height, width, device, args.temperature, cond_codes=top)
+        # The top level decides the anatomy, so it can be given its own temperature.
+        top_temperature = args.top_temperature or args.temperature
+        top = top_prior.sample(count, top_height, top_width, device, top_temperature,
+                               top_k=args.top_k, top_p=args.top_p)
+        bottom = prior.sample(count, height, width, device, args.temperature, cond_codes=top,
+                              top_k=args.top_k, top_p=args.top_p)
         return vqvae.decode_levels([top, bottom]).clamp(0, 1)
     return sample_two_level
 
@@ -491,6 +496,7 @@ def summarise_audit(args, runs, heldout_sets, real, real_vs_train, seconds, devi
         "model": args.model,
         "run": args.run_name or args.model,
         "temperature": args.temperature,
+        "sampling": sampling_tag(args) or "full",
         "num_samples": args.num_samples,
         "reference": args.reference,
         "seeds": [args.seed + r for r in range(args.repeats)],
@@ -576,7 +582,7 @@ def cached_samples(args, device, weights, run_dir):
     """
     cache_dir = os.path.join(run_dir, "samples")
     os.makedirs(cache_dir, exist_ok=True)
-    name = (f"samples_t{args.temperature:g}_seed{args.seed}_"
+    name = (f"samples_t{args.temperature:g}{sampling_tag(args)}_seed{args.seed}_"
             f"{args.repeats}x{args.num_samples}.pt")
     path = os.path.join(cache_dir, name)
     if os.path.exists(path):
@@ -646,7 +652,8 @@ def run_fid(args, device, weights, run_dir, out_dir):
                                      reference, device)
 
     results = {"model": args.model, "run": args.run_name or args.model,
-               "temperature": args.temperature, "reference": args.reference,
+               "temperature": args.temperature, "sampling": sampling_tag(args) or "full",
+               "reference": args.reference,
                "reference_patients": count_patients(reference_sets),
                "num_scored": len(samples), "num_reference": len(reference),
                "seeds": [args.seed + r for r in range(args.repeats)], **scores}
@@ -713,6 +720,14 @@ def parse_args():
                         help="PixelCNN: grids sampled in parallel.")
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="PixelCNN: sampling temperature (below 1 = safer, less varied).")
+    parser.add_argument("--top-k", type=int, default=0,
+                        help="PixelCNN: sample only from the k most likely codes (0 = all).")
+    parser.add_argument("--top-p", type=float, default=1.0,
+                        help="PixelCNN: nucleus sampling, keep codes up to this total "
+                             "probability (1.0 = all).")
+    parser.add_argument("--top-temperature", type=float, default=None,
+                        help="VQ-VAE-2: separate temperature for the top (layout) prior, "
+                             "default the same as --temperature.")
     parser.add_argument("--run-name", default=None,
                         help="Run folder under ~/hipmri_runs, default the model name.")
     parser.add_argument("--reference", choices=sorted(REFERENCE_SPLITS), default="test",
@@ -722,11 +737,24 @@ def parse_args():
     return parser.parse_args()
 
 
+def sampling_tag(args):
+    """Suffix naming the non-default sampling options, e.g. '_k32_tt0.8' ('' for defaults)."""
+    tag = ""
+    if args.top_k > 0:
+        tag += f"_k{args.top_k}"
+    if args.top_p < 1.0:
+        tag += f"_p{args.top_p:g}"
+    if args.top_temperature is not None:
+        tag += f"_tt{args.top_temperature:g}"
+    return tag
+
+
 def output_dir(args, run_dir):
     """eval[_t<T>][_<reference>] inside the run folder, unless --out-dir is given."""
     if args.out_dir:
         return args.out_dir
     name = "eval" if args.temperature == 1.0 else f"eval_t{args.temperature:g}"
+    name += sampling_tag(args)
     if (args.model in SAMPLE_MODELS or args.fid) and args.reference != "heldout":
         name += f"_{args.reference}"  # keep earlier pooled-reference results intact
     return os.path.join(run_dir, name)
