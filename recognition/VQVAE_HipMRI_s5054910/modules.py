@@ -455,6 +455,24 @@ class GatedLayer(nn.Module):
         return v_out, h_out
 
 
+def filter_logits(logits, top_k=0, top_p=1.0):
+    """Set the logits of codes outside the top-k / top-p set to -inf.
+
+    logits: (B, K). Returns a filtered copy; the defaults leave it unchanged.
+    """
+    logits = logits.clone()
+    if top_k > 0:
+        kth = torch.topk(logits, min(top_k, logits.size(1)), dim=1).values[:, -1:]
+        logits[logits < kth] = float("-inf")
+    if top_p < 1.0:
+        sorted_logits, order = torch.sort(logits, dim=1, descending=True)
+        cumulative = F.softmax(sorted_logits, dim=1).cumsum(dim=1)
+        # Drop a code once the codes before it already reach top_p (the first always stays).
+        drop = cumulative - F.softmax(sorted_logits, dim=1) >= top_p
+        logits.scatter_(1, order, sorted_logits.masked_fill(drop, float("-inf")))
+    return logits
+
+
 class PixelCNN(nn.Module):
     """Gated PixelCNN prior over VQ-VAE code grids.
 
@@ -506,15 +524,22 @@ class PixelCNN(nn.Module):
         return self.output(h)
 
     @torch.no_grad()
-    def sample(self, count, height, width, device, temperature=1.0, cond_codes=None):
-        """Sample code grids one position at a time in raster order."""
+    def sample(self, count, height, width, device, temperature=1.0, cond_codes=None,
+               top_k=0, top_p=1.0):
+        """Sample code grids one position at a time in raster order.
+
+        top_k > 0 keeps only the k most likely codes at each position; top_p < 1
+        keeps the smallest set of codes whose probability adds up to top_p. Both
+        cut off the long tail of unlikely codes, where most incoherent samples
+        start. The defaults (0 and 1.0) sample from the full distribution.
+        """
         codes = torch.zeros(count, height, width, dtype=torch.long, device=device)
         cond = self.condition(cond_codes)
         for row in range(height):
             for col in range(width):
                 # Rows below the current one cannot affect it, so they are skipped.
                 logits = self(codes[:, :row + 1], cond=cond)[:, :, row, col]
-                probs = F.softmax(logits / temperature, dim=1)
+                probs = F.softmax(filter_logits(logits / temperature, top_k, top_p), dim=1)
                 codes[:, row, col] = torch.multinomial(probs, 1).squeeze(1)
         return codes
 
