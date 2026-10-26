@@ -388,7 +388,7 @@ Test reference: 3 patients. Real floor: FID 50.9, KID 10.1. Real slices: similar
 |---|---|---|---|---|
 | ![](images/dcgan_aug_samples.png) | ![](images/wgan_gp_samples.png) | ![](images/vqvae_samples_t0.95.png) | ![](images/vqvae2_aug_samples_t0.9.png) | ![](images/vqvae2_aug_samples_k32.png) |
 
-*Figure 8. Uncurated samples from each model family.*
+*Figure 8. Uncurated samples from each model family. About half of the top-k 32 samples repeat one template (a large, bright, centred bladder between symmetric hips), which is the loss of diversity measured by pairwise SSIM; a few samples without coherent anatomy remain (e.g. its bottom-right sample).*
 
 **Interpolation** (consecutive-frame SSIM along 4 paths × 8 frames; a pixel cross-fade of the same end frames gives about 0.95):
 
