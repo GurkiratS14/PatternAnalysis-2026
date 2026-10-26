@@ -50,7 +50,7 @@ Two **gated PixelCNN priors** (van den Oord et al., 2016) learn which code grids
 | Diversity, pairwise SSIM (real 0.193; lower = more varied) | 0.245 (less varied than real) | 0.176 | 0.161 |
 | Sampling time per slice | 1.50 s | 1.48 s | 0.18 ms |
 
-Truncated (top-k) sampling is the best VQ result, but it buys quality by giving up diversity; full sampling is the VQ setting that meets every criterion except quality. Section 7.2 and Case 6 in Section 7.6 explain why.
+Truncated (top-k) sampling is the best VQ result, but it buys quality by giving up diversity; full sampling is the VQ setting that meets every criterion except quality. Section 7.2 and Case 5 in Section 7.6 explain why.
 
 ![Uncurated VQ-VAE-2 + aug samples](images/vqvae2_aug_samples_t0.9.png)
 *Figure 1. 32 uncurated VQ-VAE-2 + aug samples at temperature 0.9 (test run, seed 0).*
@@ -217,6 +217,7 @@ predict.py         evaluation driver: reconstruction, FID/KID, memorisation audi
 slurm_train.sh     Slurm job for train.py on one A100
 slurm_predict.sh   Slurm job for predict.py on one A100
 slurm_sweep.sh     submits the truncated-sampling sweep on validation (run with bash)
+sample_figures.py  multi-seed sample grids and the high-frequency texture check, from cached samples
 tests/             31 tests: model shapes, PixelCNN causality, sampling filters, preprocessing, metrics
 images/            figures used in this README
 logs/              training and evaluation logs of the final runs
@@ -239,9 +240,11 @@ sbatch slurm_predict.sh --model pixelcnn2 --run-name pixelcnn2_aug $TOP --fid --
 sbatch slurm_predict.sh --model pixelcnn2 --run-name pixelcnn2_aug $TOP --repeats 3 --temperature 0.9 --reference validate
 sbatch slurm_predict.sh --model vqvae2 --run-name vqvae2_aug --interpolate
 bash slurm_sweep.sh                                                              # top-k / top-p / top-level T on validation
+python3 sample_figures.py --out-dir ~/hipmri_runs/figures                        # Figure 8 grids, Case 3 check (no GPU)
 sbatch slurm_predict.sh --model pixelcnn2 --run-name pixelcnn2_aug $TOP --fid --repeats 3 --temperature 1.0 --top-k 32 --reference test
 ```
 - **`--fid`:** FID/KID scoring; otherwise the memorisation audit runs.
+- **Where testing happens:** `train.py` trains, validates every epoch, saves the best-validation checkpoint and plots the curves; it never touches the test patients. All testing is in `predict.py`, so test patients are scored once, after every choice was made on validation.
 - **`--top-k`, `--top-p`, `--top-temperature`:** truncated sampling (keep only the k most likely codes, or the codes up to probability p; a separate temperature for the layout level). The defaults sample the full distribution.
 - **`--reference validate`:** use this while choosing settings.
 - **`--reference test`:** use this once, for the final numbers.
@@ -259,6 +262,8 @@ sbatch slurm_train.sh --model wgan_gp --epochs 500
 
 ![Reconstructions](images/vqvae2_aug_reconstructions.png)
 *Figure 3. Best and worst VQ-VAE-2 + aug test reconstructions. Rows: input, reconstruction, absolute error.*
+
+Even the worst reconstruction (SSIM 0.889) is well above the target. The worst slices have fine, high-contrast texture (muscle striations, bowel gas), and the error concentrates along those edges: each bottom code covers a 4×4 patch, and the MSE loss favours a blurred average over a sharp guess. The same smoothing shows up in generated samples (Case 3, Section 7.6).
 
 **Example 2: generation.**
 - **Input:** a random seed.
@@ -302,10 +307,10 @@ sbatch slurm_train.sh --model wgan_gp --epochs 500
 
 ### 7.1 Evaluation protocol
 
-The evaluation keeps reconstruction and generation apart:
-- **The SSIM > 0.6 target applies to paired reconstructions only.** Each test slice is compared with its own reconstruction.
-- **Generation quality is measured with FID and KID** on Inception-v3 features.
-- **SSIM between generated and real slices is used only to detect copying,** never as a quality target. Forcing high unpaired SSIM would reward memorisation.
+**SSIM > 0.6.** The task asks for SSIM > 0.6 across the synthesised cohort against reference anatomical slices, and notes that the target is negotiable with the teaching staff depending on the problem. For VQ-VAE models, the teaching team confirmed on the course forum (20 Oct) that the 0.6 target applies to test reconstructions. This report therefore measures SSIM in both senses:
+- **Paired, against the 0.6 target:** each test slice against its own reconstruction. VQ-VAE-2 + aug scores 0.919, with every one of the 540 test slices above 0.6.
+- **Unpaired, synthesised cohort against reference slices:** each generated slice against its closest training and held-out slices ("similarity to train", near-copies). Real unseen patients only reach 0.26–0.30 against the training set, so a cohort above 0.6 would be closer to the training scans than real new patients are, which is memorisation. Here the target is the real-patient value, and SSIM acts as the privacy audit.
+- **Generation quality** (distributional coverage) is measured with FID and KID on Inception-v3 features.
 
 | Metric | What it measures | Good value |
 |---|---|---|
@@ -355,7 +360,7 @@ Validation reference: 4 patients. Real floor: FID 59.2, KID 16.7. Real slices: s
 - **Overall:** DCGAN + aug.
 - **Best Hard-model configuration:** VQ-VAE-2 + aug with top-k 32 sampling, whose KID does not overlap with the 130.9 ± 1.9 of full sampling at T = 0.9. It passes the privacy limit only narrowly (4.9 % ± 0.9 % over seeds), and it is clearly less varied than real slices (pairwise 0.245 vs 0.154). Because the rule was fixed in advance, it is still the one sent to test; full sampling at T = 0.9 is reported alongside it.
 - **Within the VQ family:** two levels beat one by about 45 FID, and augmentation removed most of the memorisation, cutting near-copies at T = 0.9 from 8.6 % to 1.2 %.
-- **Every gain in KID from truncation costs privacy and diversity** (Case 6, Section 7.6). The best truncated KID, 103 (which breaks the privacy limit), is still twice DCGAN + aug's 52.
+- **Every gain in KID from truncation costs privacy and diversity** (Case 5, Section 7.6). The best truncated KID, 103 (which breaks the privacy limit), is still twice DCGAN + aug's 52.
 
 ![Quality vs temperature](images/summary_quality_vs_temperature.png)
 *Figure 6. Validation KID against sampling temperature. Two levels beat one at every temperature, and lower temperature improves quality but raises copying (hollow marker = fails the 5 % limit).*
@@ -384,11 +389,13 @@ Test reference: 3 patients. Real floor: FID 50.9, KID 10.1. Real slices: similar
 - **The best baseline wins on perceptual quality and speed.** DCGAN + aug and VQ-VAE-2 + aug at T = 0.9 are equally private (0.4 % near-copies).
 - Similarity to train and pairwise SSIM describe only the samples, so they are identical against either reference; near-copy counts differ because each reference sets its own "real maximum".
 
-| DCGAN + aug | WGAN-GP | VQ-VAE, T = 0.95 | VQ-VAE-2 + aug, T = 0.9 | VQ-VAE-2 + aug, top-k 32 |
-|---|---|---|---|---|
-| ![](images/dcgan_aug_samples.png) | ![](images/wgan_gp_samples.png) | ![](images/vqvae_samples_t0.95.png) | ![](images/vqvae2_aug_samples_t0.9.png) | ![](images/vqvae2_aug_samples_k32.png) |
+| DCGAN + aug | WGAN-GP | VQ-VAE (single level), T = 0.95 |
+|---|---|---|
+| ![](images/dcgan_aug_seeds.png) | ![](images/wgan_gp_seeds.png) | ![](images/vqvae_samples_t0.95.png) |
+| **VQ-VAE-2 + aug, T = 0.9** | **VQ-VAE-2 + aug, top-k 32** | |
+| ![](images/vqvae2_aug_t0.9_seeds.png) | ![](images/vqvae2_aug_k32_seeds.png) | |
 
-*Figure 8. Uncurated samples from each model family. About half of the top-k 32 samples repeat one template (a large, bright, centred bladder between symmetric hips), which is the loss of diversity measured by pairwise SSIM; a few samples without coherent anatomy remain (e.g. its bottom-right sample).*
+*Figure 8. Uncurated samples: the first 8 samples of each of the 3 evaluation seeds, exactly as generated (the single-level VQ-VAE, not a final model, shows seed 0 only). About half of the top-k 32 samples repeat one template (a large, bright, centred bladder between symmetric hips), which is the loss of diversity measured by pairwise SSIM.*
 
 **Interpolation** (consecutive-frame SSIM along 4 paths × 8 frames; a pixel cross-fade of the same end frames gives about 0.95):
 
@@ -419,6 +426,8 @@ The GAN paths jump abruptly. The VQ-VAE-2 paths are smooth: at most 65–69 % of
 3. flip augmentation, which doubles the training code grids to 22,920;
 4. early stopping with patience 10, keeping the best-validation checkpoint.
 
+**Why they overfit:** 31 patients is a small cohort, and neighbouring slices of one scan are near-duplicates, so a 13–15 M-parameter prior can memorise the training grids within a few epochs. The gap between training and validation loss remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
+
 The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 18 (best epoch 8). With augmentation, the bottom prior's best validation loss went from 5.42 to 5.07 bits per code. It is measured on a different autoencoder's codes, so this is only roughly comparable.
 
 **GANs** have no validation loss to stop on, so they train for a fixed budget (DCGAN 100 epochs, WGAN-GP 500), with sample grids saved every 5 epochs.
@@ -439,24 +448,46 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 
 ### 7.6 Error autopsies
 
+Five failure cases in generated slices, each traced to its root trigger.
+
 **Case 1. Jumbled global anatomy (single-level prior).**
-- **Failure mode:** realistic texture, but no coherent pelvis. Hip joints were missing, the bladder was often in the left third of the image, and occasionally there were two bladders.
+- **Failure mode:** realistic texture, but no coherent pelvis. Hip joints were missing, the bladder was often in the left third of the image, and occasionally there were two bladders (Figure 8, top right).
 - **Root trigger:** the prior places 2,048 codes of 4×4 px in raster order. Early rows are fixed before anything decides where the later anatomy belongs.
-- **Fix:** VQ-VAE-2's 8×8-px top level plans the layout first. FID improves by about 45 at every temperature, and the bladder is centred far more often (compare the two right-hand panels of Figure 8). **Fixed.**
+- **Fix:** VQ-VAE-2's 8×8-px top level plans the layout first. FID improves by about 45 at every temperature, and the bladder is centred far more often (Figure 8). **Fixed.**
 
-**Case 2. The prior overfits a small cohort.**
-- **Failure mode:** validation loss bottoms out within 3–8 epochs and then rises, while training loss keeps falling (Figure 9).
-- **Root trigger:** 31 patients, and neighbouring slices that are near-duplicates.
-- **Fix:** the four defences in Section 7.4. The gap remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
+**Case 2. Anatomically incoherent "texture-only" samples (VQ-VAE-2 + aug).**
+- **Failure mode:** by eye, about a third of uncurated samples at T = 0.9 (Figure 8) contain no bladder, no femoral heads and no left-right symmetry, only fragmented tissue with boundaries that no real slice has (Figure 10a–c). Real slices near the front and back of a scan also lack a bladder, but they keep smooth, symmetric tissue planes.
+- **Root trigger:** the top prior commits to the layout in raster order. One unlikely code in the first rows sends the layout somewhere no training slice went, and the bottom prior then fills a plausible local texture into an impossible plan. With 31 patients, the prior's tail of unlikely codes is poorly estimated: the top prior's best validation loss, 5.56 bits per code, came at epoch 3, before it began to overfit (Section 7.4).
+- **Attempted fix:** truncated sampling (Case 5) removes that tail. The fragmented samples become rarer, but some failures remain as washed-out, featureless slices (Figure 8, top-k 32), and diversity drops.
+- **Lesson:** this is the hallucination risk in the task's dilemma. Before release, every synthetic slice should pass an anatomy check (Section 7.8).
 
-**Case 3. WGAN-GP copies training slices.**
+![VQ-VAE-2 texture-only samples](images/autopsy_vqvae2_texture.png)
+*Figure 10. (a)–(c) Texture-only VQ-VAE-2 + aug samples; (d) a coherent sample of the same seed, for contrast.*
+
+**Case 3. Wrong texture statistics: GAN speckle and VQ smoothing.**
+- **Failure mode:** in DCGAN + aug samples, bright fat bands carry a fine pixel speckle that real slices do not have. VQ-VAE-2 samples go the other way: they are smoother than real slices (Figure 11).
+- **Measurement:** the share of each slice's spectral power above 0.25 cycles per pixel, over all 768 cached samples and the 540 real test slices (`sample_figures.py`):
+
+  | | Real test | DCGAN + aug | WGAN-GP | VQ-VAE-2 + aug, T = 0.9 | top-k 32 |
+  |---|---|---|---|---|---|
+  | High-frequency power share | 0.0257 ± 0.0058 | 0.0351 ± 0.0089 | 0.0253 ± 0.0080 | 0.0128 ± 0.0030 | 0.0088 ± 0.0027 |
+  | Relative to real | 1.00 | **1.37** | 0.98 | **0.50** | 0.34 |
+
+- **Root trigger:** DCGAN's generator upsamples with stride-2 transposed convolutions, which are known to leave high-frequency artefacts (Odena et al., 2016). WGAN-GP uses the same generator yet matches the real value, so the artefact is not inevitable with this architecture; the training objective is the difference between the two. VQ-VAE-2's decoder is trained with MSE on 4×4 patches, which favours blur (Section 5), and truncated sampling smooths the samples further.
+- **Next step:** resize-then-convolve upsampling for the GAN; a perceptual or adversarial loss on the VQ decoder, as in VQGAN.
+
+![Same region of real and generated slices](images/texture_zoom.png)
+*Figure 11. The same 64 × 64 corner (left fat band) of random real test slices and generated slices, at native resolution.*
+
+**Case 4. WGAN-GP copies training slices.**
 - **Failure mode:** 9.4 % of WGAN-GP samples on validation (5.0 of 256 on test) are closer to a specific training slice than any real unseen patient ever is.
 - **Root trigger:** the critic is only loosely constrained (gradient-penalty term about 2), and nothing in the GAN objective discourages reproducing a training example. Its Wasserstein estimate *rose* from 40 to 62 while the images improved, so the loss gave no warning.
 - **Lesson:** a good average hides leaky tails, so audit the tail of the distribution, not just the mean.
 
 ![WGAN-GP nearest neighbours](images/wgan_gp_nearest_neighbours.png)
+*Figure 12. WGAN-GP samples (top) and their nearest training slices (bottom).*
 
-**Case 4. The prior, not the decoder, limits FID.**
+**Case 5. The prior limits FID, and truncated sampling cannot fix it.**
 - **Failure mode:** VQ-VAE-2 + aug samples score FID 127 on test, far above the real floor of 51.
 - **Diagnosis:** we scored the autoencoder's *reconstructions* of the floor slices with `predict.py --model vqvae2 --fid`. This splits the gap into two parts:
   ```
@@ -464,17 +495,7 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
             real     reconstructed           generated
             floor    (decoder costs 14)      (prior costs 62)
   ```
-- **Root trigger:** raster-order PixelCNN sampling produces less realistic texture statistics than a GAN. The decoder alone is not the bottleneck.
-- **Next step:** first, sample the prior more carefully (Case 6); then a stronger prior (a transformer, as in VQGAN), rather than a better decoder.
-
-**Case 5. Smoothing of finely textured slices.**
-- **Failure mode:** the worst test reconstructions (SSIM 0.889) are slices with fine high-contrast texture, such as muscle striations and bowel gas. The error concentrates along fine edges (Figure 3, right).
-- **Root trigger:** each bottom code covers a 4×4 patch, and the MSE loss favours blurry averages over sharp guesses.
-- **Next step:** add a perceptual or adversarial term to the decoder loss.
-
-**Case 6. Truncated sampling trades novelty for quality.**
-- **Attempt:** cut the prior's long tail of unlikely codes with top-k / top-p, or lower the temperature only for the layout level.
-- **Result:** KID improved (validation 131 → 103; test 112.5 → 91.8 for top-k 32), but every truncated setting moved samples towards the training set and made them more alike:
+- **Attempted fix:** cut the prior's tail of unlikely codes with top-k (Fan et al., 2018) or top-p (Holtzman et al., 2020) sampling, or lower the temperature only for the layout level. KID improved (validation 131 → 103; test 112.5 → 91.8 for top-k 32), but every truncated setting moved samples towards the training set and made them more alike:
 
   | Validation | Full, T = 0.9 | top-k 32 | top-p 0.9 | T 0.9 + top-p 0.95 |
   |---|---|---|---|---|
@@ -483,8 +504,8 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
   | Sim. to train (real 0.259) | 0.264 | 0.303 | 0.294 | 0.298 |
   | Pairwise (real 0.154) | 0.176 | 0.245 | 0.222 | 0.227 |
 
-- **Root trigger (most likely):** with 31 training patients, the codes the prior is most confident about are the ones it saw most often in training. Keeping only those codes removes the broken anatomy, but also the novelty, so "safer" sampling means sampling nearer the training set. A lower temperature for the top level alone did not help (KID 134.1), so the errors are not confined to the layout.
-- **Lesson:** the remaining gap to DCGAN is in what the prior has learned, not in how it is sampled. Even the best truncated setting, which breaks the privacy limit, sits at twice DCGAN + aug's KID. Closing it needs a better prior, not a sampling trick.
+- **Root trigger (most likely):** with 31 training patients, the codes the prior is most confident about are the ones it saw most often in training. Keeping only those removes broken anatomy, but also novelty. A lower temperature for the top level alone did not help (KID 134.1), so the errors are not confined to the layout.
+- **Lesson:** the remaining gap to DCGAN is in what the prior has learned, not in how it is sampled. Even the best truncated setting, which breaks the privacy limit, sits at twice DCGAN + aug's KID. Closing it needs a stronger prior (a transformer, as in VQGAN), not a sampling trick.
 
 ### 7.7 Outcome against the feasibility criteria
 
@@ -497,6 +518,17 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 | 5. Resources (≤ 2 h, ≤ 8 GB) | Met (but 1.50 s per sample) | Met (but 1.48 s per sample) | Met |
 
 ### 7.8 Recommendation for the project manager
+
+**Verdict on the synthetic cohort**, as the task asks:
+
+| Question | DCGAN + aug | VQ-VAE-2 + aug, T = 0.9 |
+|---|---|---|
+| **Safe / non-memorised?** | **Yes.** 0.4 % near-copies on test; samples are on average less similar to training than real patients are (0.266 vs 0.301) | **Yes.** 0.4 % near-copies; similarity to train 0.264, below real patients' 0.301 |
+| **Diverse (no mode collapse)?** | **Yes.** Pairwise SSIM 0.161 vs real 0.193 | **Yes.** 0.176 vs 0.193 (top-k 32: **no**, 0.245) |
+| **Clinically plausible?** | **Mostly.** Coherent anatomy in most samples, but grainy texture (Case 3) | **Not yet.** About a third of samples have incoherent anatomy (Case 2) and texture is too smooth |
+| **Fit for downstream training?** | For research augmentation, after filtering (below) | Not without an anatomy filter; better used as an encoder |
+
+So the cohort is **safe to share in terms of memorisation**, but **neither model is clinically plausible enough to train a diagnostic model on without review**. Both need the release checks below.
 
 **For a shareable synthetic cohort, ship DCGAN + aug.** On test patients it has:
 - the best perceptual quality (FID 86, KID 51);
@@ -539,7 +571,7 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
   - test scored once;
   - three seeds per configuration;
   - a real-data floor for context;
-  - 31 tests checking the models, the masks, the sampling filters and every metric against reference implementations.
+  - 31 tests checking the models, the masks, the sampling filters and the metrics (SSIM and FID against reference implementations).
 
 **What did not work.**
 - **Perceptual quality:** VQ-VAE-2 does not beat the best GAN baseline. The decoder diagnostic shows the reason: the PixelCNN prior accounts for most of the gap to real data.
@@ -561,19 +593,33 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 
 ## 9. Artificial Intelligence Usage Disclosure
 
-*To be written by the author.* It should cover:
-- which AI tool was used, and for what;
-- which decisions and work were the author's own;
-- how its outputs were checked;
-- a link to the conversation history or `prompt_history.pdf`.
+**Tool used:** Claude (Anthropic), as a chat assistant throughout the project.
+
+**What it helped with:**
+- **Understanding the project requirements:** reading the task specification and the course forum answers with me, and turning them into a checklist of what the report and code had to contain.
+- **Learning concepts:** explanations, with worked examples, of vector quantisation, the straight-through estimator, gated PixelCNN masking, FID and KID, and truncated (top-k / top-p) sampling.
+- **Code:** drafting and refactoring parts of the code, such as the training loops, the evaluation functions and the tests, and debugging errors from Rangpur jobs.
+- **Structuring the files and the README:** organising the code into the required modules, and the layout and wording of this report.
+
+**How I checked it:**
+- I ran every experiment myself on Rangpur, and every number in this report comes from those runs. The logs of the final runs are in [`logs/`](logs/).
+- The code is covered by 31 tests (`tests/`), including a causality test for the PixelCNN masks, checks of SSIM and FID against reference implementations (scikit-image and SciPy), and a behaviour test for KID. A deliberately broken mask makes the causality test fail, so the test does detect real errors.
+- New options (augmentation, early stopping, gradient clipping, truncated sampling) were checked to give exactly the same results as the old code when switched off.
+- Retraining the priors with the same seed reproduced the original results, and the validation ranking held on the test patients.
+- I decided the model choices, the selection rule (fixed before any FID was computed) and the final recommendation, and I can explain every part of the code.
+
+The full conversation history is available on request.
 
 ## 10. References
 
 - Bińkowski, M., Sutherland, D. J., Arbel, M. & Gretton, A. (2018). Demystifying MMD GANs. *ICLR*.
 - Dhariwal, P. et al. (2020). Jukebox: A generative model for music. *arXiv:2005.00341*.
+- Fan, A., Lewis, M. & Dauphin, Y. (2018). Hierarchical neural story generation. *ACL*.
 - Gulrajani, I. et al. (2017). Improved training of Wasserstein GANs. *NeurIPS*.
 - Heusel, M. et al. (2017). GANs trained by a two time-scale update rule converge to a local Nash equilibrium. *NeurIPS*.
+- Holtzman, A., Buys, J., Du, L., Forbes, M. & Choi, Y. (2020). The curious case of neural text degeneration. *ICLR*.
 - Loshchilov, I. & Hutter, F. (2019). Decoupled weight decay regularization. *ICLR*.
+- Odena, A., Dumoulin, V. & Olah, C. (2016). Deconvolution and checkerboard artifacts. *Distill*.
 - Radford, A., Metz, L. & Chintala, S. (2015). Unsupervised representation learning with deep convolutional GANs. *arXiv:1511.06434*.
 - Razavi, A., van den Oord, A. & Vinyals, O. (2019). Generating diverse high-fidelity images with VQ-VAE-2. *NeurIPS*.
 - Szegedy, C. et al. (2016). Rethinking the Inception architecture for computer vision. *CVPR*.
