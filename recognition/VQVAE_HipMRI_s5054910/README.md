@@ -1,7 +1,7 @@
 ---
 title: Synthetic Prostate MRI Slices with VQ-VAE-2 and PixelCNN Priors (HipMRI)
 author: Gurkirat Singh Randhawa
-student_id: s5054910
+student_id: 50549102
 course: COMP3710 Pattern Recognition and Analysis, The University of Queensland
 task: 2.4 Image Generation (Hard)
 date: 2026-10-29
@@ -9,7 +9,7 @@ date: 2026-10-29
 
 # Synthetic Prostate MRI Slices with VQ-VAE-2 and PixelCNN Priors (HipMRI)
 
-**Gurkirat Singh Randhawa · s5054910 · COMP3710 Pattern Recognition and Analysis · Task 2.4 Image Generation · Hard difficulty**
+**Gurkirat Singh Randhawa · 50549102 · COMP3710 Pattern Recognition and Analysis · Task 2.4 Image Generation · Hard difficulty**
 
 ## Contents
 1. [Problem and algorithm](#1-problem-and-algorithm)
@@ -38,7 +38,7 @@ Two **gated PixelCNN priors** (van den Oord et al., 2016) learn which code grids
 
 **Baselines.** The model is benchmarked on identical patient-level splits against a single-level **VQ-VAE** (van den Oord et al., 2017) and two GANs, **DCGAN** and **WGAN-GP**. The two strongest families, DCGAN and VQ-VAE-2, are also trained with left-right flip augmentation as an ablation.
 
-**Everything is implemented from scratch in PyTorch:** all models, the PixelCNN and the SSIM, FID and KID code. No pre-trained weights are used anywhere except the standard Inception-v3 inside FID, which is used only to *measure* images, as staff permitted on Ed.
+**Everything is implemented from scratch in PyTorch:** all models, the PixelCNN and the SSIM, FID and KID code. No pre-trained weights are used anywhere except the standard Inception-v3 inside FID, which is used only to *measure* images.
 
 **Headline results** (test patients, scored once after all choices were made on validation):
 
@@ -47,10 +47,10 @@ Two **gated PixelCNN priors** (van den Oord et al., 2016) learn which code grids
 | Reconstruction SSIM (target > 0.6) | **0.919**, 100 % of slices > 0.6 | **0.919** (same autoencoder) | — (no encoder) |
 | FID / KID×1000 (real floor 50.9 / 10.1) | 117.8 / 91.8 | 127.0 / 112.5 | **86.1 / 51.0** |
 | Near-copies of training slices | 0.7 % | **0.4 %** | **0.4 %** |
-| Diversity, pairwise SSIM (real 0.193; lower = more varied) | 0.245 ❌ | 0.176 | 0.161 |
+| Diversity, pairwise SSIM (real 0.193; lower = more varied) | 0.245 (less varied than real) | 0.176 | 0.161 |
 | Sampling time per slice | 1.50 s | 1.48 s | 0.18 ms |
 
-Truncated (top-k) sampling is the best VQ result, but it buys quality by giving up diversity; full sampling is the VQ setting that meets every criterion except quality. §7.2 and Case 6 in §7.6 explain why.
+Truncated (top-k) sampling is the best VQ result, but it buys quality by giving up diversity; full sampling is the VQ setting that meets every criterion except quality. Section 7.2 and Case 6 in Section 7.6 explain why.
 
 ![Uncurated VQ-VAE-2 + aug samples](images/vqvae2_aug_samples_t0.9.png)
 *Figure 1. 32 uncurated VQ-VAE-2 + aug samples at temperature 0.9 (test run, seed 0).*
@@ -83,9 +83,9 @@ The encoder turns an image into a grid of 64-dimensional vectors z_e. Each vecto
 
 ### 2.2 Why two levels
 
-In a single-level VQ-VAE each code covers a 4×4-pixel patch, so the prior places 2,048 codes one by one with no plan for the global layout. In practice its samples had realistic texture but jumbled anatomy (§7.6, case 1).
+In a single-level VQ-VAE each code covers a 4×4-pixel patch, so the prior places 2,048 codes one by one with no plan for the global layout. In practice its samples had realistic texture but jumbled anatomy (Section 7.6, Case 1).
 
-VQ-VAE-2 adds a **top level whose codes each cover 8×8 pixels**. The top prior decides where the bladder, hips and rectum go first. The bottom level is quantised *with the decoded top level as context*, so its codes only need to add detail. This one change improves FID by about 45 at every temperature (§7.2).
+VQ-VAE-2 adds a **top level whose codes each cover 8×8 pixels**. The top prior decides where the bladder, hips and rectum go first. The bottom level is quantised *with the decoded top level as context*, so its codes only need to add detail. This one change improves FID by about 45 at every temperature (Section 7.2).
 
 ### 2.3 Gated PixelCNN prior
 
@@ -119,7 +119,7 @@ Each factor is a 512-way softmax.
 | Commitment β | 0.25 | Value from the VQ-VAE paper; reconstruction was stable |
 | Autoencoder optimiser | Adam 2e-4, batch 64, 100 epochs, best validation SSIM kept | Validation SSIM was still rising slowly at epoch 100 |
 | Prior | 12 layers, 128 channels, 7×7 kernels | Receptive field covers most of a 32×64 grid within GPU memory |
-| Prior regularisation | dropout 0.3, AdamW weight decay 0.01 | The prior overfits 31 patients within a few epochs (§7.4) |
+| Prior regularisation | dropout 0.3, AdamW weight decay 0.01 | The prior overfits 31 patients within a few epochs (Section 7.4) |
 | Prior batch | 32 | Keeps peak memory under the 8 GB budget (4.7 GB) |
 | Early stopping | patience 10 on validation loss/SSIM | Stops once validation stops improving; the best epoch is kept |
 | Gradient clipping | norm 1.0 (priors) | Stops one unusual batch from destabilising PixelCNN training |
@@ -130,7 +130,7 @@ Each factor is a 512-way softmax.
 
 *One-page review, also available as [`feasibility_review.pdf`](feasibility_review.pdf).*
 
-> **Gurkirat Singh Randhawa (s5054910)** · COMP3710 · Domain 2.4 Image Generation · Hard difficulty · October 2026
+> **Gurkirat Singh Randhawa (50549102)** · COMP3710 · Domain 2.4 Image Generation · Hard difficulty · October 2026
 >
 > **Open dilemma:** can a generative model produce prostate MRI slices that are realistic and diverse **without memorising** the training patients?
 >
@@ -172,7 +172,7 @@ Each factor is a 512-way softmax.
 > **Next planned experiment:** one-off test-set benchmark of the selected configurations (3 seeds × 256 samples).\
 > **Fallback:** WGAN-GP or DCGAN with the same evaluation (Normal band).
 
-The final outcome against each criterion is in §7.7.
+The final outcome against each criterion is in Section 7.7.
 
 ## 4. Dependencies and reproducibility
 
@@ -203,7 +203,7 @@ Hardware: one NVIDIA A100 on UQ's Rangpur cluster (`comp3710` partition). The Sl
 - **Tested:** retraining the VQ-VAE-2 top prior with the same seed reproduced it **bit for bit**. The bottom prior matched to within ±0.005 bits per code, the remaining difference coming from non-deterministic GPU kernels.
 - **Reported spread:** every generation metric is a mean ± std over 3 seeds, because near-copy counts alone varied by 0–3 between runs.
 - **Logs:** the training and evaluation logs behind every number are in [`logs/`](logs/).
-- **Weights:** not committed (size); the commands in §5 recreate the Hard model in about 1 A100-hour.
+- **Weights:** not committed (size); the commands in Section 5 recreate the Hard model in about 1 A100-hour.
 
 ## 5. Usage, file structure, example inputs and outputs
 
@@ -279,7 +279,7 @@ sbatch slurm_train.sh --model wgan_gp --epochs 500
 | Step | What | Why |
 |---|---|---|
 | Transpose | 256×128 → 1×128×256 | Puts the body horizontal, as in a standard axial view |
-| Centre-crop | The 60 slices of 256×144 lose 8 rows top and bottom | One shape for every slice. Staff confirmed on Ed (#177) that these slices may even be discarded; cropping keeps them, and only background is removed |
+| Centre-crop | The 60 slices of 256×144 lose 8 rows top and bottom | One shape for every slice. Cropping keeps these slices instead of discarding them, and only background is removed |
 | Per-slice normalisation | Clip at the 99.5th percentile, scale to [0, 1] (GANs: [−1, 1] for tanh) | Raw scales differ between scans (e.g. 0–411); clipping stops a few bright pixels squashing the rest |
 | Augmentation (training only) | Random left-right flip; the priors learn from the codes of every slice *and* its mirror | Pelvic anatomy is roughly left-right symmetric, and 31 patients is a small cohort |
 
@@ -293,7 +293,7 @@ sbatch slurm_train.sh --model wgan_gp --epochs 500
 
 **Why these splits:**
 - **Split by patient, not by slice.** Neighbouring slices of one patient are nearly identical. A slice-level split would put near-duplicates in both train and test, inflate every score and hide memorisation. `check_no_patient_leakage()` confirms zero overlap (and a test checks that it catches a shared patient).
-- **Validation chooses, test reports.** Choosing a temperature or model by looking at test scores would bias the reported numbers upwards. Every decision in §7 was made on validation patients, and test patients were scored once at the end.
+- **Validation chooses, test reports.** Choosing a temperature or model by looking at test scores would bias the reported numbers upwards. Every decision in Section 7 was made on validation patients, and test patients were scored once at the end.
 - **Same split for every model,** so the benchmark is like for like.
 
 ## 7. Open Research Dilemma
@@ -302,7 +302,7 @@ sbatch slurm_train.sh --model wgan_gp --epochs 500
 
 ### 7.1 Evaluation protocol
 
-Following the staff answer on Ed (20 Oct):
+The evaluation keeps reconstruction and generation apart:
 - **The SSIM > 0.6 target applies to paired reconstructions only.** Each test slice is compared with its own reconstruction.
 - **Generation quality is measured with FID and KID** on Inception-v3 features.
 - **SSIM between generated and real slices is used only to detect copying,** never as a quality target. Forcing high unpaired SSIM would reward memorisation.
@@ -330,32 +330,32 @@ Validation reference: 4 patients. Real floor: FID 59.2, KID 16.7. Real slices: s
 
 | Model | FID ↓ | KID×1000 ↓ | Near-copies | Sim. to train | Pairwise | Admissible |
 |---|---|---|---|---|---|---|
-| DCGAN | 120.4 | 101.4 ± 1.7 | 2.6 % | 0.271 | 0.155 | ✅ |
-| **DCGAN + aug** | **85.9** | **52.1 ± 1.3** | 2.0 % | 0.266 | 0.161 | ✅ **selected** |
-| WGAN-GP | 129.5 | 108.5 ± 1.8 | 9.4 % | 0.297 | 0.174 | ❌ |
-| VQ-VAE, T = 1.0 / 0.95 / 0.9 | 195.3 / 185.2 / 184.5 | 216.2 / 199.3 / 196.8 | 0.4 / 1.4 / 3.5 % | 0.267–0.294 | 0.181–0.223 | ✅ |
-| VQ-VAE-2, T = 1.0 | 146.6 | 145.3 ± 1.6 | 2.5 % | 0.292 | 0.210 | ✅ |
-| VQ-VAE-2, T = 0.95 | 141.8 | 136.4 ± 1.7 | 4.6 % | 0.303 | 0.227 | ✅ |
-| VQ-VAE-2, T = 0.9 | 136.8 | 127.8 ± 1.9 | 8.6 % | 0.315 | 0.247 | ❌ |
-| VQ-VAE-2 + aug, T = 1.0 | 162.7 | 177.3 ± 2.6 | 0.4 % | 0.237 | 0.144 | ✅ |
-| VQ-VAE-2 + aug, T = 0.95 | 147.7 | 152.4 ± 2.3 | 0.1 % | 0.250 | 0.159 | ✅ |
-| **VQ-VAE-2 + aug, T = 0.9** | **135.1** | **130.9 ± 1.9** | 1.2 % | 0.264 | 0.176 | ✅ **best VQ** |
+| DCGAN | 120.4 | 101.4 ± 1.7 | 2.6 % | 0.271 | 0.155 | Yes |
+| **DCGAN + aug** | **85.9** | **52.1 ± 1.3** | 2.0 % | 0.266 | 0.161 | Yes, **selected** |
+| WGAN-GP | 129.5 | 108.5 ± 1.8 | 9.4 % | 0.297 | 0.174 | No |
+| VQ-VAE, T = 1.0 / 0.95 / 0.9 | 195.3 / 185.2 / 184.5 | 216.2 / 199.3 / 196.8 | 0.4 / 1.4 / 3.5 % | 0.267–0.294 | 0.181–0.223 | Yes |
+| VQ-VAE-2, T = 1.0 | 146.6 | 145.3 ± 1.6 | 2.5 % | 0.292 | 0.210 | Yes |
+| VQ-VAE-2, T = 0.95 | 141.8 | 136.4 ± 1.7 | 4.6 % | 0.303 | 0.227 | Yes |
+| VQ-VAE-2, T = 0.9 | 136.8 | 127.8 ± 1.9 | 8.6 % | 0.315 | 0.247 | No |
+| VQ-VAE-2 + aug, T = 1.0 | 162.7 | 177.3 ± 2.6 | 0.4 % | 0.237 | 0.144 | Yes |
+| VQ-VAE-2 + aug, T = 0.95 | 147.7 | 152.4 ± 2.3 | 0.1 % | 0.250 | 0.159 | Yes |
+| **VQ-VAE-2 + aug, T = 0.9** | **135.1** | **130.9 ± 1.9** | 1.2 % | 0.264 | 0.176 | Yes, **best VQ** |
 
 **Truncated sampling.** Temperature reshapes the whole distribution over 512 codes. Even at T = 0.9, the ~500 unlikely codes together keep some probability, and across 2,560 sequential draws a few of them are picked, which is where broken anatomy starts. Truncation removes that tail. For example, with probabilities [0.60, 0.25, 0.10, 0.04, 0.01], top-k = 2 samples only from the first two codes (renormalised to 0.71 / 0.29), and top-p = 0.9 keeps the smallest set reaching 0.9 (the first three). We tried four settings on the best prior (VQ-VAE-2 + aug), under the same rule:
 
 | Sampling (VQ-VAE-2 + aug) | FID ↓ | KID×1000 ↓ | Near-copies | Sim. to train | Pairwise | Admissible |
 |---|---|---|---|---|---|---|
-| T = 0.9, full distribution (from above) | 135.1 | 130.9 ± 1.9 | 1.2 % | 0.264 | 0.176 | ✅ |
-| **T = 1.0, top-k 32** | **131.5** | **115.5 ± 2.1** | 4.9 % | 0.303 | 0.245 | ✅ **best VQ** |
-| T = 1.0, top-p 0.9 | 119.8 | 105.8 ± 1.6 | 5.9 % | 0.294 | 0.222 | ❌ |
-| T = 0.9, top-p 0.95 | 117.8 | 103.3 ± 1.5 | 7.6 % | 0.298 | 0.227 | ❌ |
-| T = 1.0, top level at T = 0.8 | 138.8 | 134.1 ± 1.9 | 3.6 % | 0.280 | 0.197 | ✅ |
+| T = 0.9, full distribution (from above) | 135.1 | 130.9 ± 1.9 | 1.2 % | 0.264 | 0.176 | Yes |
+| **T = 1.0, top-k 32** | **131.5** | **115.5 ± 2.1** | 4.9 % | 0.303 | 0.245 | Yes, **best VQ** |
+| T = 1.0, top-p 0.9 | 119.8 | 105.8 ± 1.6 | 5.9 % | 0.294 | 0.222 | No |
+| T = 0.9, top-p 0.95 | 117.8 | 103.3 ± 1.5 | 7.6 % | 0.298 | 0.227 | No |
+| T = 1.0, top level at T = 0.8 | 138.8 | 134.1 ± 1.9 | 3.6 % | 0.280 | 0.197 | Yes |
 
 **The rule's outcome:**
 - **Overall:** DCGAN + aug.
 - **Best Hard-model configuration:** VQ-VAE-2 + aug with top-k 32 sampling, whose KID does not overlap with the 130.9 ± 1.9 of full sampling at T = 0.9. It passes the privacy limit only narrowly (4.9 % ± 0.9 % over seeds), and it is clearly less varied than real slices (pairwise 0.245 vs 0.154). Because the rule was fixed in advance, it is still the one sent to test; full sampling at T = 0.9 is reported alongside it.
 - **Within the VQ family:** two levels beat one by about 45 FID, and augmentation removed most of the memorisation, cutting near-copies at T = 0.9 from 8.6 % to 1.2 %.
-- **Every gain in KID from truncation costs privacy and diversity** (Case 6, §7.6). The best truncated KID, 103 (which breaks the privacy limit), is still twice DCGAN + aug's 52.
+- **Every gain in KID from truncation costs privacy and diversity** (Case 6, Section 7.6). The best truncated KID, 103 (which breaks the privacy limit), is still twice DCGAN + aug's 52.
 
 ![Quality vs temperature](images/summary_quality_vs_temperature.png)
 *Figure 6. Validation KID against sampling temperature. Two levels beat one at every temperature, and lower temperature improves quality but raises copying (hollow marker = fails the 5 % limit).*
@@ -447,7 +447,7 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 **Case 2. The prior overfits a small cohort.**
 - **Failure mode:** validation loss bottoms out within 3–8 epochs and then rises, while training loss keeps falling (Figure 9).
 - **Root trigger:** 31 patients, and neighbouring slices that are near-duplicates.
-- **Fix:** the four defences in §7.4. The gap remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
+- **Fix:** the four defences in Section 7.4. The gap remains, but the selected checkpoint is always the best-validation one, and augmentation lowered the best validation loss.
 
 **Case 3. WGAN-GP copies training slices.**
 - **Failure mode:** 9.4 % of WGAN-GP samples on validation (5.0 of 256 on test) are closer to a specific training slice than any real unseen patient ever is.
@@ -490,11 +490,11 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 
 | Criterion | VQ-VAE-2 + aug, top-k 32 | VQ-VAE-2 + aug, T = 0.9 | DCGAN + aug |
 |---|---|---|---|
-| 1. Fidelity: reconstruction SSIM > 0.6 | ✅ 0.919 (min 0.889) | ✅ 0.919 | — |
-| 2. Quality vs floor and baselines | ❌ FID 118 vs floor 51 | ❌ FID 127 vs floor 51 | ⚠️ FID 86 vs floor 51, best of all models |
-| 3. No memorisation (≤ 5 % near-copies) | ✅ 0.7 %, level with real patients | ✅ 0.4 %, less similar to train than real patients | ✅ 0.4 % |
-| 4. Diversity (pairwise ≤ real) | ❌ 0.245 vs 0.193 | ✅ 0.176 vs 0.193 | ✅ 0.161 vs 0.193 |
-| 5. Resources (≤ 2 h, ≤ 8 GB) | ✅ (but 1.50 s per sample) | ✅ (but 1.48 s per sample) | ✅ |
+| 1. Fidelity: reconstruction SSIM > 0.6 | Met: 0.919 (min 0.889) | Met: 0.919 | — |
+| 2. Quality vs floor and baselines | Not met: FID 118 vs floor 51 | Not met: FID 127 vs floor 51 | Partly met: FID 86 vs floor 51, best of all models |
+| 3. No memorisation (≤ 5 % near-copies) | Met: 0.7 %, level with real patients | Met: 0.4 %, less similar to train than real patients | Met: 0.4 % |
+| 4. Diversity (pairwise ≤ real) | Not met: 0.245 vs 0.193 | Met: 0.176 vs 0.193 | Met: 0.161 vs 0.193 |
+| 5. Resources (≤ 2 h, ≤ 8 GB) | Met (but 1.50 s per sample) | Met (but 1.48 s per sample) | Met |
 
 ### 7.8 Recommendation for the project manager
 
