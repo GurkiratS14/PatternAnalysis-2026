@@ -593,7 +593,7 @@ So the cohort is **safe to share in terms of memorisation**, but **neither model
 
 ## 9. Artificial Intelligence Usage Disclosure
 
-**Tool used:** Claude (Anthropic), as a chat assistant throughout the project.
+**Tool used:** Claude (Anthropic), Model-Opus 5.5
 
 **What it helped with:**
 - **Understanding the project requirements:** reading the task specification and the course forum answers with me, and turning them into a checklist of what the report and code had to contain.
@@ -608,7 +608,6 @@ So the cohort is **safe to share in terms of memorisation**, but **neither model
 - Retraining the priors with the same seed reproduced the original results, and the validation ranking held on the test patients.
 - I decided the model choices, the selection rule (fixed before any FID was computed) and the final recommendation, and I can explain every part of the code.
 
-The full conversation history is available on request.
 
 ## 10. References
 
