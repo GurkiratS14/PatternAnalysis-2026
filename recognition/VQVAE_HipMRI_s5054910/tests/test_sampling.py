@@ -1,10 +1,12 @@
-"""
-File:    test_sampling.py
-Author:  Gurkirat Singh Randhawa (s5054910)
-Course:  COMP3710 Pattern Recognition, UQ
-Date:    October 2026
-Purpose: Checks the top-k / top-p filters used when sampling the PixelCNN priors.
-"""
+# --------------------------------------------------------------------
+# File:    tests/test_sampling.py
+# Author:  Gurkirat Singh Randhawa (s5054910)
+# Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
+# Date:    October 2026
+# Purpose: Checks the top-k / top-p filters used when sampling the PixelCNN
+#          priors, and that the default sampling is unchanged.
+# --------------------------------------------------------------------
+"""Tests for filter_logits and PixelCNN.sample with top-k / top-p."""
 import torch
 
 from modules import PixelCNN, filter_logits
