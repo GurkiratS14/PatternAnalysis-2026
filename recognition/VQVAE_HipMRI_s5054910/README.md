@@ -525,10 +525,13 @@ The top prior stopped at epoch 13 (best epoch 3) and the bottom prior at epoch 1
 ## 8. Discussion and conclusion
 
 **What worked.**
-- **The Hard model reaches all three of its core goals:**
+- **The Hard model meets four of its five criteria with full sampling (T = 0.9); only quality is not met:**
   - reconstruction SSIM 0.919 on unseen patients (target 0.6);
   - near-copy rate 0.4 %;
-  - sample diversity close to real data.
+  - sample diversity close to real data;
+  - the 2 h / 8 GB training budget.
+
+  Top-k 32 sampling improves quality (test KID 112.5 → 91.8) but gives up the diversity criterion.
 - **Two-level structure** fixed the jumbled anatomy of the single-level model, and FID confirmed the visual improvement (about 45 points).
 - **Flip augmentation** was the most valuable single change. It halved DCGAN's KID, and it cured VQ-VAE-2's tendency to stay close to training slices.
 - **The evaluation can be trusted:**
