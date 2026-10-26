@@ -6,41 +6,8 @@
 # Purpose: Evaluation driver: reconstruction SSIM, FID / KID generation
 #          quality, the memorisation audit, and latent interpolation.
 # --------------------------------------------------------------------
-"""
-predict.py - Generate slices from a trained model and evaluate them.
-
-Four evaluation modes:
-
-* Reconstruction (--model vqvae / vqvae2): reconstructs every test slice and
-  scores it against its own original with paired SSIM (the >= 0.6 target).
-* Generation quality (--fid, generative models): FID and KID between generated
-  slices and the real slices of the chosen reference patients, with the same
-  scores for random real training slices as the attainable floor. Samples are
-  cached on disk, so a later run on another reference reuses them. With
-  --model vqvae / vqvae2, --fid scores the reconstructions of those training
-  slices instead: the best FID the decoder allows, before any prior is involved.
-* Memorisation audit (default for generative models): how close each sample is
-  to its most similar training slice compared with real unseen patients
-  (near-copies), and diversity as mean pairwise SSIM. SSIM is used here only to
-  detect copying, never as a quality target.
-* Interpolation (--interpolate): a latent interpolation figure and its
-  frame-to-frame smoothness.
-
---reference picks the real held-out patients used as the reference:
-validate (4 patients) for choosing models and temperatures, test (3 patients)
-for reporting final numbers, or heldout (both, 7 patients). Keeping these
-separate means test patients never influence a modelling decision.
-
-Generative models: dcgan, wgan_gp, pixelcnn (VQ-VAE + prior) and pixelcnn2
-(VQ-VAE-2 + two priors).
-
-Usage:
-    python3 predict.py --model vqvae2
-    python3 predict.py --model pixelcnn2 --fid --repeats 3 --temperature 0.95 --reference validate
-    python3 predict.py --model pixelcnn2 --repeats 3 --temperature 0.95 --reference validate
-    python3 predict.py --model dcgan --fid --repeats 3 --reference test
-    python3 predict.py --model vqvae2 --fid --repeats 3 --reference validate
-    python3 predict.py --model vqvae2 --interpolate
+"""Evaluates trained models: test reconstruction SSIM, FID / KID, memorisation audit and interpolation.
+Use --reference validate to choose settings and test for the final numbers (examples: README Section 5).
 """
 
 import argparse

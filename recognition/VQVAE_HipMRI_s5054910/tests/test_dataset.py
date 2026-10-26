@@ -6,11 +6,8 @@
 # Purpose: Checks the slice pre-processing (crop, normalisation, file names)
 #          and that the patient-leakage check catches a shared patient.
 # --------------------------------------------------------------------
-"""
-Pre-processing and data-split tests. They build a tiny fake dataset in a
-temporary folder, so the real HipMRI data is not needed.
-
-Run with:  python3 -m pytest tests/      or      python3 tests/test_dataset.py
+"""Pre-processing and split tests on a tiny fake dataset, so no real HipMRI data is needed.
+Run: python3 -m pytest tests/
 """
 
 import os

@@ -6,30 +6,9 @@
 # Purpose: Training driver for DCGAN, WGAN-GP, VQ-VAE, VQ-VAE-2 and the
 #          PixelCNN priors on HipMRI 2D slices.
 # --------------------------------------------------------------------
-"""
-train.py - Training script for HipMRI image generation models.
-
-Trains the DCGAN and WGAN-GP baselines, the VQ-VAE and VQ-VAE-2, and the
-PixelCNN priors over their codes. Saves sample or
-reconstruction grids, training curves and model weights to --out-dir, which
-should sit outside the repository.
-
-Usage:
-    python3 train.py --model dcgan --epochs 100
-    python3 train.py --model wgan_gp --epochs 500
-    python3 train.py --model vqvae --epochs 100
-    python3 train.py --model pixelcnn --epochs 60   (needs the trained VQ-VAE)
-    python3 train.py --model vqvae2 --epochs 100
-    python3 train.py --model pixelcnn --level top --run-name pixelcnn2_top \
-        --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
-    python3 train.py --model pixelcnn --level bottom --run-name pixelcnn2 \
-        --vqvae-weights ~/hipmri_runs/vqvae2/vqvae2.pt
-With flip augmentation, early stopping and (for priors) gradient clipping:
-    python3 train.py --model vqvae2 --augment --patience 10 --run-name vqvae2_aug
-    python3 train.py --model pixelcnn --level bottom --augment --grad-clip 1.0 --patience 10 \
-        --vqvae-weights ~/hipmri_runs/vqvae2_aug/vqvae2.pt --run-name pixelcnn2_aug
-Quick check on a few slices:
-    python3 train.py --model wgan_gp --epochs 2 --max-slices 64 --batch-size 16
+"""Trains the DCGAN / WGAN-GP baselines, VQ-VAE / VQ-VAE-2 and their PixelCNN priors, and saves
+weights, curves and sample grids. Options include --augment, --patience and --grad-clip;
+example commands are in README Section 5.
 """
 
 import argparse

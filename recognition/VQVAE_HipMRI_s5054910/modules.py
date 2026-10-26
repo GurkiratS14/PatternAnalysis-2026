@@ -6,17 +6,9 @@
 # Purpose: Model definitions: DCGAN generator and discriminator, WGAN-GP
 #          critic, VQ-VAE, VQ-VAE-2 and the gated PixelCNN prior.
 # --------------------------------------------------------------------
-"""
-modules.py - Model components for HipMRI image generation.
-
-Holds the DCGAN baseline (Radford et al., 2015), the WGAN-GP critic
-(Gulrajani et al., 2017), the VQ-VAE (van den Oord et al., 2017), the
-two-level VQ-VAE-2 (Razavi et al., 2019) and the gated PixelCNN prior over
-their codes (van den Oord et al., 2016), sized for 1 x 128 x 256 slices.
-Both GANs share the same generator.
-
-Run this file directly to check output shapes and parameter counts:
-    python3 modules.py
+"""DCGAN (Radford et al., 2015), WGAN-GP critic (Gulrajani et al., 2017), VQ-VAE (van den Oord
+et al., 2017), VQ-VAE-2 (Razavi et al., 2019) and gated PixelCNN prior (van den Oord et al., 2016).
+Check output shapes and parameter counts: python3 modules.py
 """
 
 import torch

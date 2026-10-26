@@ -6,16 +6,8 @@
 # Purpose: Proves the PixelCNN masks are correct: the prediction at each
 #          grid position never depends on that code or any later code.
 # --------------------------------------------------------------------
-"""
-Causality tests for the gated PixelCNN prior.
-
-The prior factorises p(c) = prod_i p(c_i | c_1 ... c_{i-1}) in raster order.
-That only holds if the logits at position i are unaffected by codes at
-positions i, i+1, ... A masking bug would let the network "see the answer",
-giving a falsely low training loss and useless samples. These tests change
-one code and check exactly which logits move.
-
-Run with:  python3 -m pytest tests/      or      python3 tests/test_pixelcnn_causality.py
+"""Checks the PixelCNN masks: changing one code may only move the logits of later raster positions.
+Run: python3 -m pytest tests/
 """
 
 import os

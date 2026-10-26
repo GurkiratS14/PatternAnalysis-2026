@@ -6,31 +6,9 @@
 # Purpose: Loads HipMRI 2D slices: transpose, centre-crop, per-slice
 #          normalisation, patient-level splits and a leakage check.
 # --------------------------------------------------------------------
-"""
-dataset.py - Data loading for the HipMRI 2D prostate MRI slices.
-
-Loads the Nifti slices from the HipMRI study (keras_slices_data), brings every
-slice to one common shape, normalises intensities to [0, 1] and serves them
-through PyTorch DataLoaders.
-
-Data audit findings this loader is built around (run on Rangpur, Oct 2026):
-    * Files are named  case_<id>_week_<n>_slice_<k>.nii.gz
-      -> "case_<id>" identifies the patient.
-    * Provided split:  train 31 patients / 11,460 slices
-                       validate 4 patients / 660 slices
-                       test 3 patients / 540 slices
-      No patient appears in more than one split, so the provided split is
-      already patient-level and is used unchanged.
-    * On disk, 12,600 slices are 256 x 128 and 60 slices are 256 x 144.
-      -> the larger slices are centre-cropped to match the rest.
-    * The arrays are stored with the body's left-right axis first, so a raw
-      slice displays sideways.
-      -> each slice is transposed to 128 x 256 (height x width), the usual
-         axial view with the body wider than it is tall.
-    * Raw intensities are unnormalised (e.g. 0 to 411 for one slice).
-
-Run this file directly for a quick check:
-    python3 dataset.py --max-slices 64 --grid sample_grid.png
+"""HipMRI 2D slice loader: patient-level splits, centre-crop and transpose to 128 x 256,
+[0, 1] normalisation and left-right flip augmentation.
+Quick check: python3 dataset.py --max-slices 64 --grid sample_grid.png
 """
 
 import argparse

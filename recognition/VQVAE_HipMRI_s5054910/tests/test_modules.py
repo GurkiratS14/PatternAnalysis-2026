@@ -6,10 +6,8 @@
 # Purpose: Checks that every model in modules.py produces the expected
 #          output shapes and has the parameter counts reported in the README.
 # --------------------------------------------------------------------
-"""
-Shape and size tests for the models. They run on the CPU in a few seconds.
-
-Run with:  python3 -m pytest tests/      or      python3 tests/test_modules.py
+"""Output-shape and parameter-count tests for every model; runs on the CPU in a few seconds.
+Run: python3 -m pytest tests/
 """
 
 import os

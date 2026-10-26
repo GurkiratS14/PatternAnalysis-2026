@@ -7,17 +7,8 @@
 #          uncurated grids across all seeds, and a high-frequency artefact
 #          measurement of generated versus real test slices.
 # --------------------------------------------------------------------
-"""
-Works only from files predict.py has already written, so it needs no GPU and
-never samples again. predict.py --fid stores every seed's samples in
-~/hipmri_runs/<run>/samples/ as one uint8 tensor (seed 0, then 1, then 2).
-
-    python3 sample_figures.py            # writes into ./figures/
-
-Outputs:
-    figures/<name>_seeds.png    first 8 samples of each seed, unselected
-    figures/zoom_strip.png      same 64 x 64 corner of real and generated slices
-    figures/high_frequency.json share of spectral power above 0.25 cycles/pixel
+"""Multi-seed sample grids and the high-frequency texture check, from samples predict.py --fid cached.
+Needs no GPU: python3 sample_figures.py --out-dir ~/hipmri_runs/figures
 """
 import argparse
 import json
@@ -98,7 +89,7 @@ def zoom_strip(rows, path, columns=6):
 
 def main():
     """Make the seed grids, the zoom strip and the high-frequency table."""
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
     parser.add_argument("--root", default=DEFAULT_ROOT)
     parser.add_argument("--out-dir", default="figures")
     args = parser.parse_args()

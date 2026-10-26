@@ -6,19 +6,9 @@
 # Purpose: Batched GPU SSIM (paired, best-match, pairwise) and the FID / KID
 #          generation-quality metrics.
 # --------------------------------------------------------------------
-"""
-metrics.py - Image similarity metrics for evaluating generated slices.
-
-Implements the Structural Similarity Index (SSIM; Wang et al., 2004) in
-PyTorch so that many image pairs can be scored at once on the GPU. Uses the
-standard settings: 11 x 11 Gaussian window with sigma 1.5, K1 = 0.01,
-K2 = 0.03, and images in [0, 1].
-
-Also computes the Frechet Inception Distance (FID; Heusel et al., 2017) and the
-Kernel Inception Distance (KID; Binkowski et al., 2018) from the 2048-d pool
-features of the standard FID Inception-v3 network (pytorch-fid). That
-pre-trained network is used only to measure generated images, as permitted by
-the course staff; every generative model here is trained from scratch.
+"""Batched GPU SSIM (Wang et al., 2004), FID (Heusel et al., 2017) and KID (Binkowski et al., 2018).
+SSIM uses an 11 x 11 Gaussian window (sigma 1.5) on images in [0, 1]; FID and KID use the
+pytorch-fid Inception-v3 only to measure images, never to train.
 """
 
 import torch

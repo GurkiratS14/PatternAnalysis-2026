@@ -6,11 +6,8 @@
 # Purpose: Checks the hand-written SSIM, FID and KID against reference
 #          implementations (scikit-image and SciPy).
 # --------------------------------------------------------------------
-"""
-Metric tests. Every number in the README comes from metrics.py, so each
-metric is compared with an independent reference implementation.
-
-Run with:  python3 -m pytest tests/      or      python3 tests/test_metrics.py
+"""Checks SSIM and FID against reference implementations (scikit-image, SciPy) and KID's behaviour.
+Run: python3 -m pytest tests/
 """
 
 import os
