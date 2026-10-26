@@ -458,6 +458,9 @@ class GatedLayer(nn.Module):
 def filter_logits(logits, top_k=0, top_p=1.0):
     """Set the logits of codes outside the top-k / top-p set to -inf.
 
+    Top-k sampling follows Fan et al. (2018); top-p (nucleus) sampling follows
+    Holtzman et al. (2020).
+
     logits: (B, K). Returns a filtered copy; the defaults leave it unchanged.
     """
     logits = logits.clone()
