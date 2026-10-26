@@ -1,7 +1,7 @@
 # --------------------------------------------------------------------
 # File:    train.py
 # Author:  Gurkirat Singh Randhawa (s5054910)
-# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Training driver for DCGAN, WGAN-GP, VQ-VAE, VQ-VAE-2 and the
 #          PixelCNN priors on HipMRI 2D slices.

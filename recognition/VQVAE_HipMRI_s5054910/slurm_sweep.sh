@@ -2,7 +2,7 @@
 # --------------------------------------------------------------------
 # File:    slurm_sweep.sh
 # Author:  Gurkirat Singh Randhawa (s5054910)
-# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Submits the VQ-VAE-2 + aug sampling sweep (top-k, top-p, top-level
 #          temperature) on the validation patients. Run on the login node:

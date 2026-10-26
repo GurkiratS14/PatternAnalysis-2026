@@ -1,7 +1,7 @@
 # --------------------------------------------------------------------
 # File:    tests/test_modules.py
 # Author:  Gurkirat Singh Randhawa (s5054910)
-# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Checks that every model in modules.py produces the expected
 #          output shapes and has the parameter counts reported in the README.

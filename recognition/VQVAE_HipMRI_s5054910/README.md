@@ -2,14 +2,14 @@
 title: Synthetic Prostate MRI Slices with VQ-VAE-2 and PixelCNN Priors (HipMRI)
 author: Gurkirat Singh Randhawa
 student_id: s5054910
-course: COMP3710 Pattern Recognition, The University of Queensland
+course: COMP3710 Pattern Recognition and Analysis, The University of Queensland
 task: 2.4 Image Generation (Hard)
 date: 2026-10-29
 ---
 
 # Synthetic Prostate MRI Slices with VQ-VAE-2 and PixelCNN Priors (HipMRI)
 
-**Gurkirat Singh Randhawa · s5054910 · COMP3710 Pattern Recognition · Task 2.4 Image Generation · Hard difficulty**
+**Gurkirat Singh Randhawa · s5054910 · COMP3710 Pattern Recognition and Analysis · Task 2.4 Image Generation · Hard difficulty**
 
 ## Contents
 1. [Problem and algorithm](#1-problem-and-algorithm)

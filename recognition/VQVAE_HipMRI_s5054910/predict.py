@@ -1,7 +1,7 @@
 # --------------------------------------------------------------------
 # File:    predict.py
 # Author:  Gurkirat Singh Randhawa (s5054910)
-# Course:  COMP3710 Pattern Recognition, The University of Queensland
+# Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Evaluation driver: reconstruction SSIM, FID / KID generation
 #          quality, the memorisation audit, and latent interpolation.
