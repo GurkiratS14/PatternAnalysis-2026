@@ -1,6 +1,6 @@
 # --------------------------------------------------------------------
 # File:    tests/test_pixelcnn_causality.py
-# Author:  Gurkirat Singh Randhawa (s5054910)
+# Author:  Gurkirat Singh Randhawa (50549102)
 # Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Proves the PixelCNN masks are correct: the prediction at each

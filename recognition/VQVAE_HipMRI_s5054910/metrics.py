@@ -1,6 +1,6 @@
 # --------------------------------------------------------------------
 # File:    metrics.py
-# Author:  Gurkirat Singh Randhawa (s5054910)
+# Author:  Gurkirat Singh Randhawa (50549102)
 # Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Batched GPU SSIM (paired, best-match, pairwise) and the FID / KID

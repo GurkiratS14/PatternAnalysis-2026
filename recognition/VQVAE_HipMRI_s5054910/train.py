@@ -1,6 +1,6 @@
 # --------------------------------------------------------------------
 # File:    train.py
-# Author:  Gurkirat Singh Randhawa (s5054910)
+# Author:  Gurkirat Singh Randhawa (50549102)
 # Course:  COMP3710 Pattern Recognition and Analysis, The University of Queensland
 # Date:    October 2026
 # Purpose: Training driver for DCGAN, WGAN-GP, VQ-VAE, VQ-VAE-2 and the
